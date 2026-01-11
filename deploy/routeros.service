@@ -1,0 +1,27 @@
+[Unit]
+Description=RouterOS Service - Gerenciamento RouterOS via API REST e WebSocket
+After=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/automais.io/routeros.io
+ExecStart=/root/automais.io/routeros.io/venv/bin/python3 /root/automais.io/routeros.io/main.py
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+SyslogIdentifier=routeros-service
+
+# Timeouts
+TimeoutStartSec=60
+TimeoutStopSec=30
+TimeoutAbortSec=10
+
+# Variáveis de ambiente
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/root/automais.io/routeros.env
+
+[Install]
+WantedBy=multi-user.target
+
