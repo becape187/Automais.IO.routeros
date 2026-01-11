@@ -74,10 +74,20 @@ def get_router_password(router: Dict[str, Any]) -> str:
     # Priorizar AutomaisApiPassword se existir
     automais_password = router.get("automaisApiPassword")
     if automais_password:
+        logger.debug(f"Usando AutomaisApiPassword para router {router.get('id', 'unknown')}")
         return automais_password
     
     # Fallback para RouterOsApiPassword
-    return router.get("routerOsApiPassword", "")
+    routeros_password = router.get("routerOsApiPassword", "")
+    logger.debug(f"Usando RouterOsApiPassword para router {router.get('id', 'unknown')}")
+    return routeros_password
+
+
+def mask_password(password: str) -> str:
+    """Mascara senha para logs (mostra primeiros 2 e últimos 2 caracteres)"""
+    if not password or len(password) <= 4:
+        return "***" if password else "(vazia)"
+    return f"{password[:2]}...{password[-2:]}"
 
 
 def generate_strong_password(length: int = 32) -> str:
@@ -140,17 +150,24 @@ def _get_router_connection_sync(router_id: str, router_ip: str, username: str, p
         router_data: Dados do router (opcional, para evitar buscar novamente)
     """
     try:
+        # Log das credenciais que serão usadas
+        password_type = "RouterOsApiPassword" if (router_data and not router_data.get("automaisApiPassword")) else "AutomaisApiPassword"
+        logger.info(f"🔐 Tentando conectar RouterOS - Router: {router_id}, IP: {router_ip}, User: '{username}', Password: {mask_password(password)} (tipo: {password_type})")
+        
         # Verificar se já existe conexão em cache
         if router_id in router_connections:
             try:
                 # Testar conexão existente
                 router_connections[router_id].get_resource('/system/identity').get()
+                logger.debug(f"✅ Usando conexão em cache para router {router_id}")
                 return router_connections[router_id]
             except:
                 # Conexão inválida, remover do cache
+                logger.debug(f"⚠️ Conexão em cache inválida para router {router_id}, removendo do cache")
                 del router_connections[router_id]
         
         # Criar nova conexão usando routeros_api.connect()
+        logger.debug(f"🔌 Criando nova conexão RouterOS para {router_ip} com usuário '{username}'")
         api = routeros_api.connect(router_ip, username=username, password=password)
         
         # Se AutomaisApiPassword estiver nulo, significa que ainda não foi trocada
@@ -218,6 +235,11 @@ async def get_router_connection(router_id: str, router_ip: str, username: str, p
         if router_data and not router_data.get("automaisApiPassword"):
             password_to_use = router_data.get("routerOsApiPassword", password)
             logger.info(f"AutomaisApiPassword nulo para router {router_id}. Usando RouterOsApiPassword para conectar.")
+            logger.info(f"🔐 Credenciais RouterOS - Router: {router_id}, IP: {router_ip}, User: {username}, Password: {mask_password(password_to_use)}")
+        else:
+            logger.info(f"🔐 Credenciais RouterOS - Router: {router_id}, IP: {router_ip}, User: {username}, Password: {mask_password(password_to_use)} (AutomaisApiPassword)")
+    else:
+        logger.info(f"🔐 Credenciais RouterOS - Router: {router_id}, IP: {router_ip}, User: {username}, Password: {mask_password(password_to_use)}")
     
     loop = asyncio.get_event_loop()
     api = await loop.run_in_executor(executor, _get_router_connection_sync, router_id, router_ip, username, password_to_use, router_data)
