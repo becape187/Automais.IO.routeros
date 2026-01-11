@@ -65,22 +65,31 @@ def get_router_password(router: Dict[str, Any]) -> str:
     """Obtém a senha correta do router
     
     Lógica:
-    - Se AutomaisApiPassword estiver disponível, usa ela
+    - Se AutomaisApiPassword estiver disponível (não null e não vazio), usa ela
     - Senão, usa RouterOsApiPassword (senha original)
     
     Returns:
         Senha a ser usada para conectar ao RouterOS
     """
-    # Priorizar AutomaisApiPassword se existir
+    router_id = router.get('id', 'unknown')
+    
+    # Priorizar AutomaisApiPassword se existir e não for vazio
     automais_password = router.get("automaisApiPassword")
-    if automais_password:
-        logger.debug(f"Usando AutomaisApiPassword para router {router.get('id', 'unknown')}")
+    if automais_password and automais_password.strip():
+        logger.debug(f"Usando AutomaisApiPassword para router {router_id}")
         return automais_password
     
     # Fallback para RouterOsApiPassword
-    routeros_password = router.get("routerOsApiPassword", "")
-    logger.debug(f"Usando RouterOsApiPassword para router {router.get('id', 'unknown')}")
-    return routeros_password
+    routeros_password = router.get("routerOsApiPassword") or ""
+    if routeros_password and routeros_password.strip():
+        logger.debug(f"Usando RouterOsApiPassword para router {router_id}")
+        return routeros_password
+    
+    # Se ambos estão vazios/null, logar erro
+    logger.error(f"⚠️ AMBAS as senhas estão vazias/null para router {router_id}!")
+    logger.error(f"   AutomaisApiPassword: {'null' if automais_password is None else f'vazia (length={len(automais_password)})'}")
+    logger.error(f"   RouterOsApiPassword: {'null' if routeros_password is None else f'vazia (length={len(routeros_password)})'}")
+    return ""
 
 
 def mask_password(password: str) -> str:
@@ -401,12 +410,13 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
         if not router_ip:
             return {"success": False, "error": "IP do router não encontrado. Configure RouterOsApiUrl ou crie um peer WireGuard."}
         
-        # Conectar ao RouterOS
+        # Conectar ao RouterOS (get_router_connection busca o router da API e usa a senha correta)
+        # Passar senha vazia aqui, pois get_router_connection vai buscar o router completo da API
         api = await get_router_connection(
             router_id,
             router_ip,
             router.get("routerOsApiUsername", "admin"),
-            router.get("routerOsApiPassword", "")
+            ""  # get_router_connection busca o router da API e usa get_router_password internamente
         )
         
         if not api:
@@ -418,7 +428,7 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
         def add_route_sync():
             route_resource = api.get_resource('/ip/route')
             route_params = {
-                "dst": route_data["destination"],
+                "dst-address": route_data["destination"],  # Corrigido: RouterOS usa dst-address, não dst
                 "gateway": route_data["gateway"],
                 "comment": comment
             }
@@ -524,7 +534,7 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
         def add_route_sync():
             route_resource = api.get_resource('/ip/route')
             route_params = {
-                "dst": route_data["destination"],
+                "dst-address": route_data["destination"],  # Corrigido: RouterOS usa dst-address, não dst
                 "gateway": route_data["gateway"],
                 "comment": comment
             }
