@@ -211,16 +211,25 @@ async def update_route_status_in_api(
 
 
 async def delete_route_from_api(router_id: str, route_id: str) -> bool:
-    """Deleta uma rota do banco via API C#"""
+    """Deleta uma rota do banco via API C# (endpoint interno)
+    
+    Este endpoint é chamado após remover a rota com sucesso do RouterOS.
+    Usa o endpoint /force para deletar diretamente do banco sem tentar remover do RouterOS novamente.
+    """
     try:
         verify_ssl = os.getenv("API_C_SHARP_VERIFY_SSL", "true").lower() == "true"
         async with httpx.AsyncClient(timeout=30.0, verify=verify_ssl) as client:
             response = await client.delete(
-                f"{API_C_SHARP_URL}/api/routers/{router_id}/routes/{route_id}",
+                f"{API_C_SHARP_URL}/api/routers/{router_id}/routes/{route_id}/force",
                 headers={"Accept": "application/json"}
             )
             
-            return response.status_code in [200, 204]
+            if response.status_code in [200, 204]:
+                logger.info(f"✅ Rota {route_id} deletada do banco com sucesso")
+                return True
+            else:
+                logger.warning(f"⚠️ Erro ao deletar rota {route_id} do banco: Status {response.status_code}")
+                return False
     except Exception as e:
         logger.error(f"Erro ao deletar rota {route_id} do banco: {e}")
         return False
