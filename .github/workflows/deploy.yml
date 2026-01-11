@@ -1,0 +1,208 @@
+name: Deploy RouterOS Service
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+      
+      - name: Create deployment package
+        run: |
+          # Verificar arquivos de serviço antes de criar o pacote
+          echo "Verificando arquivos de serviço antes de criar pacote:"
+          ls -la deploy/*.service || echo "Aviso: Nenhum arquivo .service encontrado em deploy/"
+          echo ""
+          
+          # Criar arquivo tar com todos os arquivos (exceto .git, venv, etc)
+          # Criar em diretório temporário para evitar conflito "file changed as we read it"
+          echo "Criando pacote de deploy..."
+          tar -czf /tmp/deploy.tar.gz \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='venv' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='.env' \
+            --exclude='.DS_Store' \
+            --exclude='*.tar.gz' \
+            .
+          
+          # Verificar se os arquivos de serviço estão no tar
+          echo "Verificando conteúdo do pacote:"
+          tar -tzf /tmp/deploy.tar.gz | grep -E "deploy/.*\.service" || echo "Aviso: Nenhum arquivo .service encontrado no pacote"
+          
+          # Mover para diretório atual
+          mv /tmp/deploy.tar.gz ./deploy.tar.gz
+          echo "✓ Pacote criado: deploy.tar.gz"
+      
+      - name: Copy files to server
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          timeout: 300s
+          command_timeout: 300s
+          use_insecure_cipher: false
+          debug: true
+          source: "deploy.tar.gz"
+          target: "/root/automais.io/routeros.io/"
+      
+      - name: Deploy on server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          timeout: 300s
+          command_timeout: 300s
+          use_insecure_cipher: false
+          debug: true
+          script: |
+            echo "=== Iniciando deploy RouterOS Service ==="
+            
+            # Ir para diretório da aplicação
+            cd /root/automais.io/routeros.io
+            
+            echo "Extraindo arquivos..."
+            tar -xzf deploy.tar.gz
+            rm deploy.tar.gz
+            
+            echo "Verificando arquivos extraídos..."
+            echo "Conteúdo do diretório deploy:"
+            ls -la deploy/ || echo "Diretório deploy não encontrado"
+            echo ""
+            echo "Verificando se arquivos de serviço existem:"
+            [ -f "deploy/routeros.service" ] && echo "✓ deploy/routeros.service existe" || echo "✗ deploy/routeros.service NÃO existe"
+            
+            echo "📦 Instalando/atualizando dependências Python..."
+            
+            # Verificar se python3-venv está instalado
+            if ! dpkg -l | grep -q python3-venv; then
+              echo "Instalando python3-venv..."
+              sudo apt-get update -qq
+              sudo apt-get install -y python3-venv python3-pip
+            fi
+            
+            # Remover venv antigo se existir mas estiver corrompido
+            if [ -d "venv" ] && [ ! -f "venv/bin/activate" ]; then
+              echo "Removendo venv corrompido..."
+              rm -rf venv
+            fi
+            
+            # Criar venv se não existir
+            if [ ! -d "venv" ]; then
+              echo "Criando venv..."
+              python3 -m venv venv
+            fi
+            
+            # Verificar se venv foi criado corretamente
+            if [ ! -f "venv/bin/activate" ]; then
+              echo "❌ Erro: Falha ao criar venv. Verificando Python..."
+              python3 --version
+              which python3
+              exit 1
+            fi
+            
+            # Ativar venv e instalar dependências
+            source venv/bin/activate
+            pip install --upgrade pip --quiet
+            pip install -r requirements.txt --quiet
+            
+            # Verificar se uvicorn foi instalado corretamente
+            if [ ! -f "venv/bin/uvicorn" ]; then
+              echo "⚠️  uvicorn não encontrado, instalando novamente..."
+              pip install uvicorn[standard] --quiet
+            fi
+            
+            # Verificar instalação final
+            if [ ! -f "venv/bin/uvicorn" ]; then
+              echo "❌ Erro: uvicorn ainda não está instalado"
+              echo "Conteúdo de venv/bin/:"
+              ls -la venv/bin/ || true
+              exit 1
+            fi
+            
+            echo "✅ Dependências instaladas"
+            echo "Verificando instalação:"
+            ls -lh venv/bin/uvicorn || true
+            
+            # Verificar/criar arquivo de configuração routeros.env
+            if [ ! -f "/root/automais.io/routeros.env" ]; then
+              echo "⚠️  Arquivo routeros.env não encontrado"
+              if [ -f "routeros.env.example" ]; then
+                echo "Criando routeros.env a partir do exemplo..."
+                sudo cp routeros.env.example /root/automais.io/routeros.env
+                sudo chmod 600 /root/automais.io/routeros.env
+                echo "⚠️  IMPORTANTE: Edite /root/automais.io/routeros.env com as configurações corretas!"
+              else
+                echo "❌ Arquivo routeros.env.example não encontrado no repositório"
+                echo "Crie manualmente o arquivo /root/automais.io/routeros.env"
+              fi
+            else
+              echo "✓ Arquivo routeros.env encontrado"
+            fi
+            
+            # Copiar arquivos de serviço systemd se existirem
+            echo "📦 Configurando serviços systemd..."
+            echo "Diretório atual: $(pwd)"
+            echo "Verificando arquivos antes de copiar:"
+            ls -la deploy/*.service 2>/dev/null || echo "Nenhum arquivo .service encontrado em deploy/"
+            
+            # Serviço RouterOS
+            if [ -f "deploy/routeros.service" ]; then
+              echo "✓ Copiando routeros.service..."
+              sudo cp -v deploy/routeros.service /etc/systemd/system/routeros.service
+              sudo chmod 644 /etc/systemd/system/routeros.service
+              echo "✓ routeros.service copiado com sucesso"
+            else
+              echo "⚠️  ERRO: Arquivo deploy/routeros.service não encontrado"
+              echo "Conteúdo do diretório deploy:"
+              ls -la deploy/ || echo "Diretório deploy não existe"
+            fi
+            
+            # Recarregar systemd (caso os arquivos tenham sido atualizados)
+            sudo systemctl daemon-reload
+            
+            # Configurar e iniciar routeros.service
+            echo ""
+            echo "🔧 Configurando routeros.service..."
+            if systemctl list-unit-files | grep -q routeros.service; then
+              echo "✓ Serviço routeros encontrado"
+              
+              # Verificar se está habilitado
+              if systemctl is-enabled routeros.service >/dev/null 2>&1; then
+                echo "✓ Serviço routeros está habilitado"
+              else
+                echo "Habilitando routeros.service..."
+                sudo systemctl enable routeros.service || echo "Aviso: Erro ao habilitar"
+              fi
+              
+              echo "Reiniciando routeros.service..."
+              sudo systemctl restart routeros.service
+              
+              # Aguardar um pouco e verificar status
+              sleep 3
+              echo "Status do routeros.service:"
+              sudo systemctl status routeros.service --no-pager || true
+            else
+              echo "⚠️  Serviço routeros.service não encontrado"
+              echo "Para criar o serviço manualmente:"
+              echo "  sudo cp deploy/routeros.service /etc/systemd/system/"
+              echo "  sudo systemctl daemon-reload"
+              echo "  sudo systemctl enable routeros.service"
+              echo "  sudo systemctl start routeros.service"
+            fi
+            
+            echo "=== Deploy concluído ==="
