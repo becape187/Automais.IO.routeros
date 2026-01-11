@@ -505,9 +505,48 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
         logger.debug(f"📝 Comentário original: {comment}")
         logger.debug(f"📝 Comentário normalizado: {comment_normalized}")
         
-        # Verificar se gateway está vazio - se estiver, usar apenas interface (RouterOS usará interface como gateway)
+        # Verificar se gateway está vazio - se estiver, detectar interface WireGuard automaticamente
         gateway = route_data.get("gateway", "").strip() if route_data.get("gateway") else ""
         interface_name = route_data.get("interface_name", "").strip() if route_data.get("interface_name") else ""
+        
+        # Se gateway está vazio, detectar interface WireGuard automaticamente
+        if not gateway and not interface_name:
+            logger.info(f"🔍 Gateway vazio - detectando interface WireGuard automaticamente...")
+            try:
+                # Buscar interfaces WireGuard do RouterOS
+                password = get_router_password(router)
+                interfaces = await list_wireguard_interfaces(
+                    router_id,
+                    router_ip,
+                    router.get("routerOsApiUsername", "admin"),
+                    password
+                )
+                
+                # Buscar peer WireGuard do router no banco
+                peers = await get_router_wireguard_peers_from_api(router_id)
+                
+                if peers and len(peers) > 0 and interfaces and len(interfaces) > 0:
+                    # Comparar publickey para encontrar a interface correta
+                    router_public_key = peers[0].get("publicKey")
+                    matching_interface = next(
+                        (iface for iface in interfaces 
+                         if (iface.get("publicKey") == router_public_key or 
+                             iface.get("public-key") == router_public_key)),
+                        None
+                    )
+                    
+                    if matching_interface:
+                        interface_name = matching_interface.get("name")
+                        logger.info(f"✅ Interface WireGuard detectada automaticamente: '{interface_name}' (publicKey: {router_public_key[:20]}...)")
+                    else:
+                        logger.warning(f"⚠️ Interface WireGuard não encontrada para publicKey do router")
+                        return {"success": False, "error": "Interface WireGuard não encontrada. Configure gateway ou interface manualmente."}
+                else:
+                    logger.warning(f"⚠️ Não foi possível detectar interface: peers={len(peers) if peers else 0}, interfaces={len(interfaces) if interfaces else 0}")
+                    return {"success": False, "error": "Não foi possível detectar interface WireGuard. Configure gateway ou interface manualmente."}
+            except Exception as e:
+                logger.error(f"❌ Erro ao detectar interface WireGuard: {e}")
+                return {"success": False, "error": f"Erro ao detectar interface WireGuard: {str(e)}"}
         
         if not gateway and not interface_name:
             logger.error(f"❌ Gateway e interface não podem estar ambos vazios")
@@ -521,18 +560,20 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
                     "comment": comment_normalized  # Usar versão normalizada
                 }
                 
-                # Se gateway está vazio, usar apenas interface (RouterOS usará interface como gateway)
+                # Se gateway está vazio mas temos interface, usar interface como gateway
+                # No RouterOS, podemos especificar o nome da interface diretamente no campo gateway
                 if gateway:
                     route_params["gateway"] = gateway
                 elif interface_name:
-                    # Não enviar gateway - RouterOS usará a interface como gateway automaticamente
-                    route_params["interface"] = interface_name
-                    logger.info(f"📝 Gateway vazio - RouterOS usará interface '{interface_name}' como gateway")
+                    # Quando gateway está vazio, usar o nome da interface como gateway
+                    # RouterOS aceita nome de interface no campo gateway
+                    route_params["gateway"] = interface_name
+                    logger.info(f"📝 Gateway vazio - usando interface '{interface_name}' como gateway no RouterOS")
                 else:
                     # Fallback: se não tem nem gateway nem interface, usar gateway vazio (RouterOS pode rejeitar)
                     route_params["gateway"] = ""
                 
-                # Se tem interface e gateway, incluir ambos
+                # Se tem interface e gateway (IP), incluir ambos
                 if interface_name and gateway:
                     route_params["interface"] = interface_name
                 
@@ -565,23 +606,30 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
                 logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id_routeros}")
                 
                 # Buscar a rota criada para obter o gateway usado pelo RouterOS
-                # Se gateway estava vazio, RouterOS pode ter usado a interface como gateway
+                # Quando interface foi usada como gateway, RouterOS armazena o nome da interface no campo gateway
                 created_routes = route_resource.get(id=route_id_routeros)
                 if created_routes and len(created_routes) > 0:
                     created_route = created_routes[0]  # get() retorna uma lista
                     gateway_from_routeros = created_route.get("gateway", "")
                     interface_from_routeros = created_route.get("interface", "")
                     
-                    # Se gateway estava vazio mas RouterOS retornou um gateway (provavelmente a interface)
-                    if not gateway and gateway_from_routeros:
-                        logger.info(f"📝 RouterOS usou gateway: '{gateway_from_routeros}' (interface: '{interface_from_routeros}')")
-                        return (route_id_routeros, gateway_from_routeros)
+                    # Se gateway estava vazio e usamos interface como gateway
+                    # RouterOS armazena o nome da interface no campo gateway
+                    if not gateway and interface_name:
+                        # O gateway retornado pelo RouterOS será o nome da interface
+                        gateway_used = gateway_from_routeros if gateway_from_routeros else interface_name
+                        logger.info(f"📝 Interface '{interface_name}' salva no campo gateway: '{gateway_used}'")
+                        return (route_id_routeros, gateway_used)
                     elif gateway:
-                        # Gateway foi fornecido, usar o mesmo
+                        # Gateway foi fornecido (IP), usar o mesmo
                         return (route_id_routeros, gateway)
+                    elif gateway_from_routeros:
+                        # RouterOS retornou um gateway (pode ser IP ou nome de interface)
+                        logger.info(f"📝 RouterOS retornou gateway: '{gateway_from_routeros}'")
+                        return (route_id_routeros, gateway_from_routeros)
                     elif interface_from_routeros:
                         # Gateway vazio e RouterOS não retornou gateway - usar interface como gateway
-                        logger.info(f"📝 RouterOS usou interface como gateway: '{interface_from_routeros}'")
+                        logger.info(f"📝 Usando interface como gateway: '{interface_from_routeros}'")
                         return (route_id_routeros, interface_from_routeros)
                     else:
                         # Nenhum gateway ou interface encontrado
@@ -589,7 +637,9 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
                 else:
                     logger.warning(f"⚠️ Não foi possível buscar rota criada para obter gateway. ID: {route_id_routeros}")
                     # Se não conseguiu buscar, usar gateway fornecido ou interface como fallback
-                    return (route_id_routeros, gateway if gateway else interface_name)
+                    # Se interface foi detectada, usar interface_name como gateway
+                    gateway_used = gateway if gateway else (interface_name if interface_name else "")
+                    return (route_id_routeros, gateway_used)
                     
             except Exception as sync_error:
                 logger.error(f"❌ Erro ao executar comando no RouterOS: {sync_error}")
@@ -704,9 +754,51 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
         logger.debug(f"📝 Comentário original: {comment}")
         logger.debug(f"📝 Comentário normalizado: {comment_normalized}")
         
-        # Verificar se gateway está vazio - se estiver, usar apenas interface (RouterOS usará interface como gateway)
+        # Verificar se gateway está vazio - se estiver, detectar interface WireGuard automaticamente
         gateway = route_data.get("gateway", "").strip() if route_data.get("gateway") else ""
         interface_name = route_data.get("interface", "").strip() if route_data.get("interface") else ""
+        
+        # Se gateway está vazio, detectar interface WireGuard automaticamente
+        if not gateway and not interface_name:
+            logger.info(f"🔍 Gateway vazio - detectando interface WireGuard automaticamente...")
+            try:
+                # Buscar interfaces WireGuard do RouterOS
+                password = get_router_password(router)
+                interfaces = await list_wireguard_interfaces(
+                    router_id,
+                    router_ip,
+                    router.get("routerOsApiUsername", "admin"),
+                    password
+                )
+                
+                # Buscar peer WireGuard do router no banco
+                peers = await get_router_wireguard_peers_from_api(router_id)
+                
+                if peers and len(peers) > 0 and interfaces and len(interfaces) > 0:
+                    # Comparar publickey para encontrar a interface correta
+                    router_public_key = peers[0].get("publicKey")
+                    matching_interface = next(
+                        (iface for iface in interfaces 
+                         if (iface.get("publicKey") == router_public_key or 
+                             iface.get("public-key") == router_public_key)),
+                        None
+                    )
+                    
+                    if matching_interface:
+                        interface_name = matching_interface.get("name")
+                        logger.info(f"✅ Interface WireGuard detectada automaticamente: '{interface_name}' (publicKey: {router_public_key[:20]}...)")
+                    else:
+                        logger.warning(f"⚠️ Interface WireGuard não encontrada para publicKey do router")
+                        await ws.send(json.dumps({"error": "Interface WireGuard não encontrada. Configure gateway ou interface manualmente."}))
+                        return
+                else:
+                    logger.warning(f"⚠️ Não foi possível detectar interface: peers={len(peers) if peers else 0}, interfaces={len(interfaces) if interfaces else 0}")
+                    await ws.send(json.dumps({"error": "Não foi possível detectar interface WireGuard. Configure gateway ou interface manualmente."}))
+                    return
+            except Exception as e:
+                logger.error(f"❌ Erro ao detectar interface WireGuard: {e}")
+                await ws.send(json.dumps({"error": f"Erro ao detectar interface WireGuard: {str(e)}"}))
+                return
         
         if not gateway and not interface_name:
             await ws.send(json.dumps({"error": "Gateway ou interface deve ser fornecido"}))
@@ -720,18 +812,20 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
                     "comment": comment_normalized  # Usar versão normalizada
                 }
                 
-                # Se gateway está vazio, usar apenas interface (RouterOS usará interface como gateway)
+                # Se gateway está vazio mas temos interface, usar interface como gateway
+                # No RouterOS, podemos especificar o nome da interface diretamente no campo gateway
                 if gateway:
                     route_params["gateway"] = gateway
                 elif interface_name:
-                    # Não enviar gateway - RouterOS usará a interface como gateway automaticamente
-                    route_params["interface"] = interface_name
-                    logger.info(f"📝 Gateway vazio - RouterOS usará interface '{interface_name}' como gateway")
+                    # Quando gateway está vazio, usar o nome da interface como gateway
+                    # RouterOS aceita nome de interface no campo gateway
+                    route_params["gateway"] = interface_name
+                    logger.info(f"📝 Gateway vazio - usando interface '{interface_name}' como gateway no RouterOS")
                 else:
                     # Fallback: se não tem nem gateway nem interface, usar gateway vazio
                     route_params["gateway"] = ""
                 
-                # Se tem interface e gateway, incluir ambos
+                # Se tem interface e gateway (IP), incluir ambos
                 if interface_name and gateway:
                     route_params["interface"] = interface_name
                 
@@ -764,24 +858,40 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
                 logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id_routeros}")
                 
                 # Buscar a rota criada para obter o gateway usado pelo RouterOS
-                # Se gateway estava vazio, RouterOS pode ter usado a interface como gateway
+                # Quando interface foi usada como gateway, RouterOS armazena o nome da interface no campo gateway
                 created_routes = route_resource.get(id=route_id_routeros)
-                gateway_used = gateway  # Default: usar gateway fornecido
                 if created_routes and len(created_routes) > 0:
                     created_route = created_routes[0]  # get() retorna uma lista
                     gateway_from_routeros = created_route.get("gateway", "")
                     interface_from_routeros = created_route.get("interface", "")
                     
-                    # Se gateway estava vazio mas RouterOS retornou um gateway (provavelmente a interface)
-                    if not gateway and gateway_from_routeros:
-                        gateway_used = gateway_from_routeros
-                        logger.info(f"📝 RouterOS usou gateway: '{gateway_used}' (interface: '{interface_from_routeros}')")
-                    elif not gateway and interface_from_routeros:
+                    # Se gateway estava vazio e usamos interface como gateway
+                    # RouterOS armazena o nome da interface no campo gateway
+                    if not gateway and interface_name:
+                        # O gateway retornado pelo RouterOS será o nome da interface
+                        gateway_used = gateway_from_routeros if gateway_from_routeros else interface_name
+                        logger.info(f"📝 Interface '{interface_name}' salva no campo gateway: '{gateway_used}'")
+                        return (route_id_routeros, gateway_used)
+                    elif gateway:
+                        # Gateway foi fornecido (IP), usar o mesmo
+                        return (route_id_routeros, gateway)
+                    elif gateway_from_routeros:
+                        # RouterOS retornou um gateway (pode ser IP ou nome de interface)
+                        logger.info(f"📝 RouterOS retornou gateway: '{gateway_from_routeros}'")
+                        return (route_id_routeros, gateway_from_routeros)
+                    elif interface_from_routeros:
                         # Gateway vazio e RouterOS não retornou gateway - usar interface como gateway
-                        gateway_used = interface_from_routeros
-                        logger.info(f"📝 RouterOS usou interface como gateway: '{gateway_used}'")
-                
-                return (route_id_routeros, gateway_used)
+                        logger.info(f"📝 Usando interface como gateway: '{interface_from_routeros}'")
+                        return (route_id_routeros, interface_from_routeros)
+                    else:
+                        # Nenhum gateway ou interface encontrado
+                        return (route_id_routeros, "")
+                else:
+                    logger.warning(f"⚠️ Não foi possível buscar rota criada para obter gateway. ID: {route_id_routeros}")
+                    # Se não conseguiu buscar, usar gateway fornecido ou interface como fallback
+                    # Se interface foi detectada, usar interface_name como gateway
+                    gateway_used = gateway if gateway else (interface_name if interface_name else "")
+                    return (route_id_routeros, gateway_used)
                     
             except Exception as sync_error:
                 logger.error(f"❌ Erro ao executar comando no RouterOS: {sync_error}")
