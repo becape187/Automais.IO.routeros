@@ -20,47 +20,70 @@ async def get_all_routers_from_api(server_endpoint: str = None) -> List[Dict[str
     """
     try:
         verify_ssl = os.getenv("API_C_SHARP_VERIFY_SSL", "true").lower() == "true"
-        async with httpx.AsyncClient(timeout=30.0, verify=verify_ssl) as client:
+        url = f"{API_C_SHARP_URL}/api/vpn/networks/{server_endpoint}/resources" if server_endpoint else f"{API_C_SHARP_URL}/api/routers"
+        
+        logger.info(f"🔍 Buscando routers da API: {url} (SSL verify: {verify_ssl}, API URL: {API_C_SHARP_URL})")
+        
+        async with httpx.AsyncClient(
+            timeout=30.0,
+            verify=verify_ssl,
+            follow_redirects=True
+        ) as client:
             if server_endpoint:
                 # Buscar routers via endpoint do servidor (similar ao vpnserver.io)
                 response = await client.get(
-                    f"{API_C_SHARP_URL}/api/vpn/networks/{server_endpoint}/resources",
+                    url,
                     headers={"Accept": "application/json"}
                 )
                 
                 if response.status_code == 200:
                     data = response.json()
                     routers = data.get("routers", [])
-                    logger.debug(f"Encontrados {len(routers)} router(s) para endpoint '{server_endpoint}'")
+                    logger.info(f"✅ Encontrados {len(routers)} router(s) para endpoint '{server_endpoint}'")
                     return routers
                 elif response.status_code == 404:
-                    logger.warning(f"Nenhuma VpnNetwork encontrada com endpoint '{server_endpoint}' na API principal")
+                    logger.warning(f"⚠️ Nenhuma VpnNetwork encontrada com endpoint '{server_endpoint}' na API principal")
                     return []
                 else:
-                    logger.warning(f"Erro ao buscar routers para endpoint '{server_endpoint}': Status {response.status_code}")
+                    logger.warning(f"⚠️ Erro ao buscar routers para endpoint '{server_endpoint}': Status {response.status_code} - {response.text[:200]}")
                     return []
             else:
                 # Fallback: buscar todos os routers (endpoint genérico)
                 response = await client.get(
-                    f"{API_C_SHARP_URL}/api/routers",
+                    url,
                     headers={"Accept": "application/json"}
                 )
                 
                 if response.status_code == 200:
                     routers = response.json()
-                    logger.debug(f"Encontrados {len(routers)} router(s) na API")
+                    logger.info(f"✅ Encontrados {len(routers)} router(s) na API")
                     return routers
                 elif response.status_code == 404:
-                    logger.warning("Endpoint /api/routers não encontrado na API C#.")
+                    logger.warning("⚠️ Endpoint /api/routers não encontrado na API C#.")
                     return []
                 else:
-                    logger.warning(f"Erro ao buscar routers: Status {response.status_code}")
+                    logger.warning(f"⚠️ Erro ao buscar routers: Status {response.status_code} - {response.text[:200]}")
                     return []
+    except httpx.ConnectError as e:
+        logger.error(f"❌ Erro de conexão ao buscar routers da API: {e}")
+        logger.error(f"   URL tentada: {url}")
+        logger.error(f"   Verifique se a API C# está acessível em {API_C_SHARP_URL}")
+        return []
+    except httpx.TimeoutException as e:
+        logger.error(f"⏱️ Timeout ao buscar routers da API: {e}")
+        logger.error(f"   URL tentada: {url}")
+        return []
+    except httpx.HTTPStatusError as e:
+        logger.error(f"📡 Erro HTTP {e.response.status_code} ao buscar routers: {e.response.url}")
+        logger.error(f"   Resposta: {e.response.text[:200]}")
+        return []
     except httpx.RequestError as e:
-        logger.error(f"Erro de conexão ao buscar routers da API: {e}")
+        logger.error(f"❌ Erro de requisição ao buscar routers da API: {e}")
+        logger.error(f"   URL tentada: {url}")
         return []
     except Exception as e:
-        logger.error(f"Erro ao buscar routers da API: {e}")
+        logger.error(f"❌ Erro inesperado ao buscar routers da API: {type(e).__name__}: {e}")
+        logger.error(f"   URL tentada: {url}")
         return []
 
 
