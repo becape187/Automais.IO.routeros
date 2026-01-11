@@ -9,6 +9,7 @@ from typing import Dict, Any, List
 import httpx
 from config import API_C_SHARP_URL, SYNC_INTERVAL_SECONDS, MONITOR_INTERVAL_SECONDS
 from api_client import (
+    get_all_routers_from_api,
     get_router_static_routes_from_api,
     get_router_wireguard_peers_from_api,
     get_router_from_api,
@@ -25,20 +26,6 @@ from routeros_websocket import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def get_all_routers_from_api() -> List[Dict[str, Any]]:
-    """Busca todos os routers da API C#"""
-    try:
-        verify_ssl = os.getenv("API_C_SHARP_VERIFY_SSL", "true").lower() == "true"
-        async with httpx.AsyncClient(timeout=30.0, verify=verify_ssl) as client:
-            # TODO: Implementar endpoint na API C# para listar todos os routers
-            # Por enquanto, retornar lista vazia - será implementado quando necessário
-            logger.warning("get_all_routers_from_api não implementado - será necessário criar endpoint na API C#")
-            return []
-    except Exception as e:
-        logger.error(f"Erro ao buscar routers da API: {e}")
-        return []
 
 
 async def sync_routes_for_router(router: Dict[str, Any]) -> None:
@@ -270,16 +257,19 @@ async def retry_failed_routes(
 
 
 async def sync_routes_for_all_routers() -> None:
-    """Sincroniza rotas de todos os routers"""
+    """Sincroniza rotas de todos os routers baseado no ROUTEROS_SERVER_ENDPOINT"""
     try:
-        # TODO: Implementar busca de todos os routers quando necessário
-        # Por enquanto, esta função será chamada apenas para routers específicos
-        routers = await get_all_routers_from_api()
-        
-        if not routers:
+        if not ROUTEROS_SERVER_ENDPOINT:
+            logger.warning("ROUTEROS_SERVER_ENDPOINT não configurado. Não é possível sincronizar recursos.")
             return
         
-        logger.debug(f"🔄 Sincronizando rotas de {len(routers)} router(s)")
+        routers = await get_all_routers_from_api(ROUTEROS_SERVER_ENDPOINT)
+        
+        if not routers:
+            logger.debug(f"Nenhum router encontrado para endpoint '{ROUTEROS_SERVER_ENDPOINT}'")
+            return
+        
+        logger.info(f"🔄 Sincronizando rotas de {len(routers)} router(s) para endpoint '{ROUTEROS_SERVER_ENDPOINT}'")
         
         # Sincronizar rotas de todos os routers em paralelo
         tasks = [sync_routes_for_router(router) for router in routers]

@@ -7,9 +7,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Configuração via variáveis de ambiente
+ROUTEROS_SERVER_ENDPOINT = os.getenv("ROUTEROS_SERVER_ENDPOINT", "")
 API_C_SHARP_URL = os.getenv("API_C_SHARP_URL", "http://localhost:5000")
 PORT = int(os.getenv("ROUTEROS_PORT", "8765"))  # Porta do WebSocket RouterOS
 HTTP_PORT = int(os.getenv("ROUTEROS_HTTP_PORT", "8001"))  # Porta HTTP para API REST
+
+if not ROUTEROS_SERVER_ENDPOINT:
+    logger.warning("⚠️ ROUTEROS_SERVER_ENDPOINT não configurado! O serviço não saberá quais recursos gerenciar.")
 
 # Configurações de monitoramento e sincronização
 MONITOR_INTERVAL_SECONDS = int(os.getenv("MONITOR_INTERVAL_SECONDS", "60"))

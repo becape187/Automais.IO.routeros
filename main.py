@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import HTTP_PORT, SYNC_INTERVAL_SECONDS
+from config import HTTP_PORT, SYNC_INTERVAL_SECONDS, ROUTEROS_SERVER_ENDPOINT
 from models import AddRouteRequest, RemoveRouteRequest
 from monitor import background_sync_loop
 from routeros_websocket import (
@@ -65,7 +65,11 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     """Health check"""
-    return {"status": "ok", "service": "routeros"}
+    return {
+        "status": "ok",
+        "service": "routeros",
+        "endpoint": ROUTEROS_SERVER_ENDPOINT or "Não configurado"
+    }
 
 
 @app.get(
