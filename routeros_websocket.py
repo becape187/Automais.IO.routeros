@@ -442,8 +442,28 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
             if route_data.get("routing_table"):
                 route_params["routing-table"] = route_data["routing_table"]
             
+            # Log do comando que será enviado ao RouterOS
+            logger.info(f"📤 Enviando comando RouterOS: /ip/route/add")
+            logger.info(f"   Parâmetros: {route_params}")
+            cmd_str = " ".join([f"={k}={v}" for k, v in route_params.items()])
+            logger.info(f"   Comando completo: /ip/route/add {cmd_str}")
+            
             result = route_resource.add(**route_params)
-            return result.get("ret")
+            
+            # O resultado é um AsynchronousResponse com done_message['ret']
+            if hasattr(result, 'done_message'):
+                route_id = result.done_message.get('ret')
+                logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
+                return route_id
+            else:
+                # Fallback: tentar acessar diretamente se for dict
+                if isinstance(result, dict):
+                    route_id = result.get('ret')
+                    logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
+                    return route_id
+                else:
+                    logger.error(f"❌ Formato de resposta inesperado: {type(result)} - {result}")
+                    return None
         
         loop = asyncio.get_event_loop()
         route_id_routeros = await loop.run_in_executor(executor, add_route_sync)
@@ -468,7 +488,14 @@ async def remove_route_from_routeros(router_id: str, router_ip: str, username: s
         
         def remove_route_sync():
             route_resource = api.get_resource('/ip/route')
+            
+            # Log do comando que será enviado ao RouterOS
+            logger.info(f"📤 Enviando comando RouterOS: /ip/route/remove")
+            logger.info(f"   ID da rota: {router_os_route_id}")
+            logger.info(f"   Comando completo: /ip/route/remove =.id={router_os_route_id}")
+            
             route_resource.remove(id=router_os_route_id)
+            logger.info(f"✅ Rota removida com sucesso. ID RouterOS: {router_os_route_id}")
         
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(executor, remove_route_sync)
@@ -548,8 +575,28 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
             if route_data.get("routingTable"):
                 route_params["routing-table"] = route_data["routingTable"]
             
+            # Log do comando que será enviado ao RouterOS
+            logger.info(f"📤 Enviando comando RouterOS: /ip/route/add")
+            logger.info(f"   Parâmetros: {route_params}")
+            cmd_str = " ".join([f"={k}={v}" for k, v in route_params.items()])
+            logger.info(f"   Comando completo: /ip/route/add {cmd_str}")
+            
             result = route_resource.add(**route_params)
-            return result.get("ret")
+            
+            # O resultado é um AsynchronousResponse com done_message['ret']
+            if hasattr(result, 'done_message'):
+                route_id = result.done_message.get('ret')
+                logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
+                return route_id
+            else:
+                # Fallback: tentar acessar diretamente se for dict
+                if isinstance(result, dict):
+                    route_id = result.get('ret')
+                    logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
+                    return route_id
+                else:
+                    logger.error(f"❌ Formato de resposta inesperado: {type(result)} - {result}")
+                    return None
         
         loop = asyncio.get_event_loop()
         route_id_routeros = await loop.run_in_executor(executor, add_route_sync)
@@ -680,7 +727,14 @@ async def handle_delete_route(router_id: str, router_ip: str, username: str, pas
         
         def remove_route_sync():
             route_resource = api.get_resource('/ip/route')
+            
+            # Log do comando que será enviado ao RouterOS
+            logger.info(f"📤 Enviando comando RouterOS: /ip/route/remove")
+            logger.info(f"   ID da rota: {route_routeros_id}")
+            logger.info(f"   Comando completo: /ip/route/remove =.id={route_routeros_id}")
+            
             route_resource.remove(id=route_routeros_id)
+            logger.info(f"✅ Rota removida com sucesso. ID RouterOS: {route_routeros_id}")
         
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(executor, remove_route_sync)
