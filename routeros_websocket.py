@@ -158,17 +158,80 @@ def _get_router_connection_sync(router_id: str, router_ip: str, username: str, p
         if router_id in router_connections:
             try:
                 # Testar conexão existente
-                router_connections[router_id].get_resource('/system/identity').get()
-                logger.debug(f"✅ Usando conexão em cache para router {router_id}")
+                test_api = router_connections[router_id]
+                test_resource = test_api.get_resource('/system/identity')
+                identity = test_resource.get()
+                logger.debug(f"✅ Usando conexão em cache para router {router_id} (identity: {identity})")
                 return router_connections[router_id]
-            except:
+            except Exception as cache_error:
                 # Conexão inválida, remover do cache
-                logger.debug(f"⚠️ Conexão em cache inválida para router {router_id}, removendo do cache")
+                logger.debug(f"⚠️ Conexão em cache inválida para router {router_id}, removendo do cache. Erro: {cache_error}")
                 del router_connections[router_id]
         
         # Criar nova conexão usando routeros_api.connect()
         logger.debug(f"🔌 Criando nova conexão RouterOS para {router_ip} com usuário '{username}'")
-        api = routeros_api.connect(router_ip, username=username, password=password)
+        logger.debug(f"   Detalhes da senha: length={len(password) if password else 0}, tipo={type(password)}, primeiro_char={ord(password[0]) if password and len(password) > 0 else 'N/A'}, último_char={ord(password[-1]) if password and len(password) > 0 else 'N/A'}")
+        
+        try:
+            # RouterOS 6.43+ requer plaintext_login=True
+            # Tentar primeiro com plaintext_login (método moderno)
+            try:
+                api = routeros_api.connect(router_ip, username=username, password=password, plaintext_login=True)
+                logger.info(f"✅ Conexão RouterOS estabelecida com sucesso (plaintext_login) para {router_ip} (usuário: {username})")
+            except TypeError:
+                # Se plaintext_login não for suportado na função connect(), tentar sem
+                logger.debug(f"⚠️ plaintext_login não suportado em connect(), tentando método alternativo...")
+                # Tentar usar RouterOsApiPool como alternativa
+                pool = routeros_api.RouterOsApiPool(router_ip, username=username, password=password, plaintext_login=True)
+                api = pool.get_api()
+                logger.info(f"✅ Conexão RouterOS estabelecida com sucesso (via RouterOsApiPool) para {router_ip} (usuário: {username})")
+            except Exception as e:
+                # Se falhar, tentar sem plaintext_login (para RouterOS antigo)
+                logger.debug(f"⚠️ Falha com plaintext_login, tentando método antigo (MD5)...")
+                api = routeros_api.connect(router_ip, username=username, password=password)
+                logger.info(f"✅ Conexão RouterOS estabelecida com sucesso (método antigo) para {router_ip} (usuário: {username})")
+            
+            # Testar a conexão imediatamente
+            try:
+                test_resource = api.get_resource('/system/identity')
+                identity_result = test_resource.get()
+                logger.debug(f"✅ Teste de conexão bem-sucedido: {identity_result}")
+            except Exception as test_error:
+                logger.warning(f"⚠️ Conexão estabelecida mas teste falhou: {test_error}")
+                # Não falhar ainda, pode ser um problema temporário
+                
+        except RouterOsApiConnectionError as e:
+            logger.error(f"❌ Erro de conexão RouterOS para {router_ip}: {e}")
+            logger.error(f"   Detalhes: IP={router_ip}, User='{username}', Password length={len(password) if password else 0}")
+            logger.error(f"   Tipo de exceção: RouterOsApiConnectionError")
+            raise
+        except RouterOsApiCommunicationError as e:
+            error_str = str(e).lower()
+            logger.error(f"❌ Erro de comunicação RouterOS para {router_ip}: {e}")
+            logger.error(f"   Detalhes: IP={router_ip}, User='{username}', Password length={len(password) if password else 0}")
+            logger.error(f"   Tipo de exceção: RouterOsApiCommunicationError")
+            # Verificar se o erro é de autenticação
+            if "invalid user" in error_str or "password" in error_str or "(6)" in error_str:
+                logger.error(f"   ⚠️ Erro de autenticação detectado. Verifique:")
+                logger.error(f"      - Usuário '{username}' existe no RouterOS?")
+                logger.error(f"      - Senha está correta? (tipo: {password_type})")
+                logger.error(f"      - Senha (primeiros 10): {password[:10] if password and len(password) >= 10 else password}")
+                logger.error(f"      - Senha (últimos 5): {password[-5:] if password and len(password) >= 5 else ''}")
+                logger.error(f"      - Senha contém caracteres especiais? Verifique encoding.")
+            raise
+        except Exception as e:
+            error_str = str(e).lower()
+            logger.error(f"❌ Erro inesperado ao conectar RouterOS para {router_ip}: {type(e).__name__}: {e}")
+            logger.error(f"   Detalhes: IP={router_ip}, User='{username}', Password length={len(password) if password else 0}")
+            logger.error(f"   Tipo de exceção: {type(e).__name__}")
+            # Verificar se o erro é de autenticação mesmo sendo uma exceção genérica
+            if "invalid user" in error_str or "password" in error_str or "(6)" in error_str:
+                logger.error(f"   ⚠️ Erro de autenticação detectado em exceção genérica:")
+                logger.error(f"      - Usuário '{username}' existe no RouterOS?")
+                logger.error(f"      - Senha está correta? (tipo: {password_type})")
+                logger.error(f"      - Senha (primeiros 10): {password[:10] if password and len(password) >= 10 else password}")
+                logger.error(f"      - Senha (últimos 5): {password[-5:] if password and len(password) >= 5 else ''}")
+            raise
         
         # Se AutomaisApiPassword estiver nulo, significa que ainda não foi trocada
         # Se conseguir conectar com RouterOsApiPassword, alterar imediatamente
@@ -187,8 +250,13 @@ def _get_router_connection_sync(router_id: str, router_ip: str, username: str, p
                     except:
                         pass
                     
-                    # Reconectar com nova senha
-                    api = routeros_api.connect(router_ip, username=username, password=new_password)
+                    # Reconectar com nova senha (usar plaintext_login para RouterOS 6.43+)
+                    try:
+                        api = routeros_api.connect(router_ip, username=username, password=new_password, plaintext_login=True)
+                    except TypeError:
+                        # Se plaintext_login não for suportado, usar RouterOsApiPool
+                        pool = routeros_api.RouterOsApiPool(router_ip, username=username, password=new_password, plaintext_login=True)
+                        api = pool.get_api()
                     
                     # Armazenar temporariamente para atualização assíncrona no banco
                     # RouterOsApiPassword -> NULL, AutomaisApiPassword -> nova senha
@@ -202,11 +270,50 @@ def _get_router_connection_sync(router_id: str, router_ip: str, username: str, p
                 logger.error(f"Erro ao alterar senha na primeira conexão para router {router_id}: {e}")
                 # Continuar mesmo se falhar a alteração de senha
         
+        # Testar conexão fazendo uma operação simples (mas não falhar se der erro)
+        try:
+            test_resource = api.get_resource('/system/identity')
+            identity = test_resource.get()
+            logger.info(f"✅ Teste de conexão bem-sucedido: {identity}")
+        except Exception as test_error:
+            error_str = str(test_error).lower()
+            # Se for erro de autenticação, realmente falhar
+            if "invalid user" in error_str or "password" in error_str or "(6)" in error_str:
+                logger.error(f"❌ Erro de autenticação no teste de conexão: {test_error}")
+                logger.error(f"   A conexão foi estabelecida mas a autenticação falhou ao executar comando")
+                try:
+                    api.disconnect()
+                except:
+                    pass
+                raise Exception(f"Erro de autenticação ao testar conexão: {test_error}")
+            else:
+                # Outros erros podem ser temporários, apenas avisar
+                logger.warning(f"⚠️ Conexão estabelecida mas teste falhou (não crítico): {test_error}")
+                logger.warning(f"   Continuando mesmo assim - pode ser um problema temporário")
+        
         router_connections[router_id] = api
-        logger.info(f"Conexão RouterOS estabelecida: {router_id} -> {router_ip}")
+        logger.info(f"✅ Conexão RouterOS estabelecida: {router_id} -> {router_ip}")
         return api
+    except RouterOsApiConnectionError as e:
+        logger.error(f"❌ Erro de conexão RouterOS {router_id} ({router_ip}): {e}")
+        logger.error(f"   Verifique se o RouterOS está acessível em {router_ip}")
+        return None
+    except RouterOsApiCommunicationError as e:
+        error_str = str(e).lower()
+        if "invalid user" in error_str or "password" in error_str or "(6)" in error_str:
+            logger.error(f"❌ Erro de autenticação RouterOS {router_id} ({router_ip}): {e}")
+            logger.error(f"   Usuário: '{username}'")
+            logger.error(f"   Tipo de senha: {password_type}")
+            logger.error(f"   Senha (mascarada): {mask_password(password)}")
+            logger.error(f"   Comprimento da senha: {len(password) if password else 0} caracteres")
+        else:
+            logger.error(f"❌ Erro de comunicação RouterOS {router_id} ({router_ip}): {e}")
+        return None
     except Exception as e:
-        logger.error(f"Erro ao conectar RouterOS {router_id} ({router_ip}): {e}")
+        logger.error(f"❌ Erro inesperado ao conectar RouterOS {router_id} ({router_ip}): {type(e).__name__}: {e}")
+        logger.error(f"   Traceback completo será logado abaixo")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
