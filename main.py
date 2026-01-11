@@ -138,6 +138,18 @@ async def add_route(request: AddRouteRequest):
     - **destination**: Destino da rota (ex: 0.0.0.0/0)
     - **gateway**: Gateway da rota (ex: 10.0.0.1)
     """
+    # Log do conteúdo recebido no POST
+    logger.info(f"📥 POST /api/v1/routeros/add-route recebido:")
+    logger.info(f"   router_id: {request.router_id}")
+    logger.info(f"   route_id: {request.route_id}")
+    logger.info(f"   destination: {request.destination}")
+    logger.info(f"   gateway: '{request.gateway}'")
+    logger.info(f"   interface_name: '{request.interface_name}'")
+    logger.info(f"   distance: {request.distance}")
+    logger.info(f"   scope: {request.scope}")
+    logger.info(f"   routing_table: '{request.routing_table}'")
+    logger.info(f"   comment: '{request.comment}'")
+    
     route_data = {
         "route_id": request.route_id,
         "destination": request.destination,
@@ -155,6 +167,12 @@ async def add_route(request: AddRouteRequest):
         # Se RouterOS retornou um gateway usado (pode ser diferente do fornecido se gateway estava vazio)
         gateway_used = result.get("gateway_used")
         router_os_id = result.get("router_os_id")
+        
+        # Log da resposta que será enviada
+        logger.info(f"📤 Resposta POST /api/v1/routeros/add-route:")
+        logger.info(f"   success: {result.get('success')}")
+        logger.info(f"   router_os_id: {router_os_id}")
+        logger.info(f"   gateway_used: '{gateway_used or ''}'")
         
         # Retornar resposta com gateway_used - o controller C# fará a atualização no banco
         # Isso garante que o gateway seja sempre atualizado, mesmo se gateway_used for o nome da interface
