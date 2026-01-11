@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 async def sync_routes_for_router(router: Dict[str, Any]) -> None:
-    """Sincroniza rotas de um router: verifica se rotas Applied ainda existem no RouterOS e tenta reaplicar rotas com Error"""
+    """Sincroniza rotas de um router: 
+    - Verifica se rotas Applied ainda existem no RouterOS
+    - Processa rotas PendingRemove (tenta remover do RouterOS e deleta do banco se sucesso)
+    - Tenta reaplicar rotas com Error"""
     router_id = router.get("id")
     router_name = router.get("name", "Unknown")
     
@@ -43,6 +46,12 @@ async def sync_routes_for_router(router: Dict[str, Any]) -> None:
             if r.get("status") == "Applied" or r.get("status") == 3 or str(r.get("status")).lower() == "applied"
         ]
         
+        # Rotas com status PendingRemove (para tentar remover do RouterOS)
+        routes_pending_remove = [
+            r for r in routes_db 
+            if r.get("status") == "PendingRemove" or r.get("status") == 2 or str(r.get("status")).lower() == "pendingremove"
+        ]
+        
         # Rotas com status Error (para tentar reaplicar)
         routes_error = [
             r for r in routes_db 
@@ -50,7 +59,7 @@ async def sync_routes_for_router(router: Dict[str, Any]) -> None:
         ]
         
         # Se não há rotas para processar, retornar
-        if not routes_applied and not routes_error:
+        if not routes_applied and not routes_pending_remove and not routes_error:
             return
         
         # Obter IP do router
@@ -130,6 +139,11 @@ async def sync_routes_for_router(router: Dict[str, Any]) -> None:
             except Exception as e:
                 logger.error(f"Erro ao remover rota {route_id} do banco: {e}")
         
+        # Processar rotas PendingRemove (tentar remover do RouterOS)
+        if routes_pending_remove:
+            logger.info(f"🔄 Processando {len(routes_pending_remove)} rota(s) pendentes para remoção do router {router_name}")
+            await process_pending_remove_routes(router_id, router_name, router_ip, router_data, password, routes_pending_remove)
+        
         # Tentar reaplicar rotas com status Error
         if routes_error:
             logger.info(f"🔄 Tentando reaplicar {len(routes_error)} rota(s) com status Error do router {router_name}")
@@ -137,6 +151,77 @@ async def sync_routes_for_router(router: Dict[str, Any]) -> None:
         
     except Exception as e:
         logger.error(f"Erro ao sincronizar rotas do router {router_name} ({router_id}): {e}")
+
+
+async def process_pending_remove_routes(
+    router_id: str,
+    router_name: str,
+    router_ip: str,
+    router_data: Dict[str, Any],
+    password: str,
+    routes_pending_remove: List[Dict[str, Any]]
+) -> None:
+    """Processa rotas com status PendingRemove
+    
+    Fluxo:
+    1. Tenta remover do RouterOS
+    2. Se sucesso → deleta do banco via API C#
+    3. Se falha → marca como Error no banco (para retentar no próximo ciclo)
+    """
+    try:
+        for route_db in routes_pending_remove:
+            route_id = route_db.get("id")
+            router_os_id = route_db.get("routerOsId")
+            destination = route_db.get("destination", "")
+            
+            try:
+                # Se não tem RouterOsId, a rota não está no RouterOS, apenas deletar do banco
+                if not router_os_id or router_os_id.strip() == "":
+                    logger.info(f"🗑️ Rota {route_id} (destino: {destination}) não tem RouterOsId. Deletando do banco.")
+                    await delete_route_from_api(router_id, route_id)
+                    logger.info(f"✅ Rota {route_id} removida do banco (não estava no RouterOS)")
+                    continue
+                
+                # Tentar remover do RouterOS
+                logger.info(f"🗑️ Tentando remover rota {route_id} (destino: {destination}) do RouterOS")
+                
+                result = await remove_route_from_routeros(
+                    router_id,
+                    router_ip,
+                    router_data.get("routerOsApiUsername", "admin"),
+                    password,
+                    router_os_id
+                )
+                
+                if result.get("success"):
+                    # Remoção bem-sucedida → deletar do banco
+                    await delete_route_from_api(router_id, route_id)
+                    logger.info(f"✅ Rota {route_id} removida do RouterOS e do banco com sucesso")
+                else:
+                    # Falha na remoção → marcar como Error para retentar no próximo ciclo
+                    error_msg = result.get("error", "Erro desconhecido ao remover rota")
+                    logger.warning(f"⚠️ Falha ao remover rota {route_id} do RouterOS: {error_msg}")
+                    await update_route_status_in_api(
+                        router_id,
+                        route_id,
+                        4,  # Error
+                        router_os_id,
+                        error_msg
+                    )
+                    
+            except Exception as e:
+                logger.error(f"❌ Erro ao processar remoção da rota {route_id}: {e}")
+                # Marcar como Error para retentar no próximo ciclo
+                await update_route_status_in_api(
+                    router_id,
+                    route_id,
+                    4,  # Error
+                    router_os_id,
+                    str(e)
+                )
+                
+    except Exception as e:
+        logger.error(f"Erro ao processar rotas pendentes para remoção do router {router_name}: {e}")
 
 
 async def retry_failed_routes(
@@ -194,14 +279,17 @@ async def retry_failed_routes(
                     result = await add_route_to_routeros(router_id, route_data)
                     
                     if result.get("success"):
-                        # Atualizar status para Applied via API
+                        # Atualizar status para Applied via API, incluindo gateway usado pelo RouterOS
+                        gateway_used = result.get("gateway_used")
                         await update_route_status_in_api(
                             router_id,
                             route_id,
                             3,  # Applied
-                            result.get("router_os_id")
+                            result.get("router_os_id"),
+                            None,  # error_message
+                            gateway_used  # gateway usado pelo RouterOS
                         )
-                        logger.info(f"✅ Rota {route_id} reaplicada com sucesso (adicionada)")
+                        logger.info(f"✅ Rota {route_id} reaplicada com sucesso (adicionada). Gateway usado: '{gateway_used}'")
                     else:
                         error_msg = result.get("error", "Erro desconhecido")
                         logger.warning(f"⚠️ Falha ao reaplicar rota {route_id}: {error_msg}")

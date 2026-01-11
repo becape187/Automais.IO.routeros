@@ -166,11 +166,20 @@ async def update_route_status_in_api(
     route_id: str,
     status: int,
     router_os_id: str = None,
-    error_message: str = None
+    error_message: str = None,
+    gateway: str = None
 ) -> bool:
     """Atualiza status de uma rota via API C#
     
     Status: 1=PendingAdd, 2=PendingRemove, 3=Applied, 4=Error
+    
+    Args:
+        router_id: ID do router
+        route_id: ID da rota
+        status: Status da rota (1=PendingAdd, 2=PendingRemove, 3=Applied, 4=Error)
+        router_os_id: ID da rota no RouterOS (opcional)
+        error_message: Mensagem de erro (opcional)
+        gateway: Gateway usado pela rota (opcional, pode ser atualizado quando RouterOS usa interface como gateway)
     """
     try:
         verify_ssl = os.getenv("API_C_SHARP_VERIFY_SSL", "true").lower() == "true"
@@ -183,6 +192,8 @@ async def update_route_status_in_api(
                 payload["routerOsId"] = router_os_id
             if error_message:
                 payload["errorMessage"] = error_message
+            if gateway:
+                payload["gateway"] = gateway
                 
             response = await client.post(
                 f"{API_C_SHARP_URL}/api/routers/{router_id}/routes/update-status",

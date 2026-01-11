@@ -505,17 +505,37 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
         logger.debug(f"📝 Comentário original: {comment}")
         logger.debug(f"📝 Comentário normalizado: {comment_normalized}")
         
+        # Verificar se gateway está vazio - se estiver, usar apenas interface (RouterOS usará interface como gateway)
+        gateway = route_data.get("gateway", "").strip() if route_data.get("gateway") else ""
+        interface_name = route_data.get("interface_name", "").strip() if route_data.get("interface_name") else ""
+        
+        if not gateway and not interface_name:
+            logger.error(f"❌ Gateway e interface não podem estar ambos vazios")
+            return {"success": False, "error": "Gateway ou interface deve ser fornecido"}
+        
         def add_route_sync():
             try:
                 route_resource = api.get_resource('/ip/route')
                 route_params = {
                     "dst-address": route_data["destination"],  # Corrigido: RouterOS usa dst-address, não dst
-                    "gateway": route_data["gateway"],
                     "comment": comment_normalized  # Usar versão normalizada
                 }
                 
-                if route_data.get("interface_name"):
-                    route_params["interface"] = route_data["interface_name"]
+                # Se gateway está vazio, usar apenas interface (RouterOS usará interface como gateway)
+                if gateway:
+                    route_params["gateway"] = gateway
+                elif interface_name:
+                    # Não enviar gateway - RouterOS usará a interface como gateway automaticamente
+                    route_params["interface"] = interface_name
+                    logger.info(f"📝 Gateway vazio - RouterOS usará interface '{interface_name}' como gateway")
+                else:
+                    # Fallback: se não tem nem gateway nem interface, usar gateway vazio (RouterOS pode rejeitar)
+                    route_params["gateway"] = ""
+                
+                # Se tem interface e gateway, incluir ambos
+                if interface_name and gateway:
+                    route_params["interface"] = interface_name
+                
                 if route_data.get("distance"):
                     route_params["distance"] = str(route_data["distance"])
                 if route_data.get("scope"):
@@ -532,27 +552,45 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
                 result = route_resource.add(**route_params)
                 
                 # O resultado é um AsynchronousResponse com done_message['ret']
+                route_id_routeros = None
                 if hasattr(result, 'done_message'):
-                    route_id = result.done_message.get('ret')
-                    if route_id:
-                        logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
-                        return route_id
+                    route_id_routeros = result.done_message.get('ret')
+                elif isinstance(result, dict):
+                    route_id_routeros = result.get('ret')
+                
+                if not route_id_routeros:
+                    logger.error(f"❌ Rota adicionada mas ID não retornado. Resposta: {result}")
+                    raise Exception(f"ID da rota não retornado pelo RouterOS")
+                
+                logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id_routeros}")
+                
+                # Buscar a rota criada para obter o gateway usado pelo RouterOS
+                # Se gateway estava vazio, RouterOS pode ter usado a interface como gateway
+                created_routes = route_resource.get(id=route_id_routeros)
+                if created_routes and len(created_routes) > 0:
+                    created_route = created_routes[0]  # get() retorna uma lista
+                    gateway_from_routeros = created_route.get("gateway", "")
+                    interface_from_routeros = created_route.get("interface", "")
+                    
+                    # Se gateway estava vazio mas RouterOS retornou um gateway (provavelmente a interface)
+                    if not gateway and gateway_from_routeros:
+                        logger.info(f"📝 RouterOS usou gateway: '{gateway_from_routeros}' (interface: '{interface_from_routeros}')")
+                        return (route_id_routeros, gateway_from_routeros)
+                    elif gateway:
+                        # Gateway foi fornecido, usar o mesmo
+                        return (route_id_routeros, gateway)
+                    elif interface_from_routeros:
+                        # Gateway vazio e RouterOS não retornou gateway - usar interface como gateway
+                        logger.info(f"📝 RouterOS usou interface como gateway: '{interface_from_routeros}'")
+                        return (route_id_routeros, interface_from_routeros)
                     else:
-                        logger.error(f"❌ Rota adicionada mas ID não retornado. Resposta: {result.done_message}")
-                        raise Exception(f"ID da rota não retornado pelo RouterOS. Resposta: {result.done_message}")
+                        # Nenhum gateway ou interface encontrado
+                        return (route_id_routeros, "")
                 else:
-                    # Fallback: tentar acessar diretamente se for dict
-                    if isinstance(result, dict):
-                        route_id = result.get('ret')
-                        if route_id:
-                            logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
-                            return route_id
-                        else:
-                            logger.error(f"❌ Rota adicionada mas ID não retornado. Resposta: {result}")
-                            raise Exception(f"ID da rota não retornado pelo RouterOS. Resposta: {result}")
-                    else:
-                        logger.error(f"❌ Formato de resposta inesperado: {type(result)} - {result}")
-                        raise Exception(f"Formato de resposta inesperado do RouterOS: {type(result)} - {result}")
+                    logger.warning(f"⚠️ Não foi possível buscar rota criada para obter gateway. ID: {route_id_routeros}")
+                    # Se não conseguiu buscar, usar gateway fornecido ou interface como fallback
+                    return (route_id_routeros, gateway if gateway else interface_name)
+                    
             except Exception as sync_error:
                 logger.error(f"❌ Erro ao executar comando no RouterOS: {sync_error}")
                 import traceback
@@ -560,17 +598,20 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
                 raise
         
         loop = asyncio.get_event_loop()
-        route_id_routeros = await loop.run_in_executor(executor, add_route_sync)
+        result_tuple = await loop.run_in_executor(executor, add_route_sync)
         
-        if not route_id_routeros:
+        if not result_tuple or not result_tuple[0]:
             logger.error(f"❌ Rota não foi adicionada - route_id_routeros é None")
             return {"success": False, "error": "Rota não foi adicionada - ID não retornado pelo RouterOS"}
         
-        logger.info(f"✅ Rota adicionada com sucesso - RouterOS ID: {route_id_routeros}")
+        route_id_routeros, gateway_used = result_tuple
+        
+        logger.info(f"✅ Rota adicionada com sucesso - RouterOS ID: {route_id_routeros}, Gateway usado: '{gateway_used}'")
         return {
             "success": True,
             "message": "Rota adicionada com sucesso",
-            "router_os_id": route_id_routeros
+            "router_os_id": route_id_routeros,
+            "gateway_used": gateway_used  # Gateway realmente usado pelo RouterOS
         }
         
     except Exception as e:
@@ -663,53 +704,105 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
         logger.debug(f"📝 Comentário original: {comment}")
         logger.debug(f"📝 Comentário normalizado: {comment_normalized}")
         
+        # Verificar se gateway está vazio - se estiver, usar apenas interface (RouterOS usará interface como gateway)
+        gateway = route_data.get("gateway", "").strip() if route_data.get("gateway") else ""
+        interface_name = route_data.get("interface", "").strip() if route_data.get("interface") else ""
+        
+        if not gateway and not interface_name:
+            await ws.send(json.dumps({"error": "Gateway ou interface deve ser fornecido"}))
+            return
+        
         def add_route_sync():
-            route_resource = api.get_resource('/ip/route')
-            route_params = {
-                "dst-address": route_data["destination"],  # Corrigido: RouterOS usa dst-address, não dst
-                "gateway": route_data["gateway"],
-                "comment": comment_normalized  # Usar versão normalizada
-            }
-            
-            if route_data.get("interface"):
-                route_params["interface"] = route_data["interface"]
-            if route_data.get("distance"):
-                route_params["distance"] = str(route_data["distance"])
-            if route_data.get("scope"):
-                route_params["scope"] = str(route_data["scope"])
-            if route_data.get("routingTable"):
-                route_params["routing-table"] = route_data["routingTable"]
-            
-            # Log do comando que será enviado ao RouterOS
-            logger.info(f"📤 Enviando comando RouterOS: /ip/route/add")
-            logger.info(f"   Parâmetros: {route_params}")
-            cmd_str = " ".join([f"={k}={v}" for k, v in route_params.items()])
-            logger.info(f"   Comando completo: /ip/route/add {cmd_str}")
-            
-            result = route_resource.add(**route_params)
-            
-            # O resultado é um AsynchronousResponse com done_message['ret']
-            if hasattr(result, 'done_message'):
-                route_id = result.done_message.get('ret')
-                logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
-                return route_id
-            else:
-                # Fallback: tentar acessar diretamente se for dict
-                if isinstance(result, dict):
-                    route_id = result.get('ret')
-                    logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
-                    return route_id
+            try:
+                route_resource = api.get_resource('/ip/route')
+                route_params = {
+                    "dst-address": route_data["destination"],  # Corrigido: RouterOS usa dst-address, não dst
+                    "comment": comment_normalized  # Usar versão normalizada
+                }
+                
+                # Se gateway está vazio, usar apenas interface (RouterOS usará interface como gateway)
+                if gateway:
+                    route_params["gateway"] = gateway
+                elif interface_name:
+                    # Não enviar gateway - RouterOS usará a interface como gateway automaticamente
+                    route_params["interface"] = interface_name
+                    logger.info(f"📝 Gateway vazio - RouterOS usará interface '{interface_name}' como gateway")
                 else:
-                    logger.error(f"❌ Formato de resposta inesperado: {type(result)} - {result}")
-                    return None
+                    # Fallback: se não tem nem gateway nem interface, usar gateway vazio
+                    route_params["gateway"] = ""
+                
+                # Se tem interface e gateway, incluir ambos
+                if interface_name and gateway:
+                    route_params["interface"] = interface_name
+                
+                if route_data.get("distance"):
+                    route_params["distance"] = str(route_data["distance"])
+                if route_data.get("scope"):
+                    route_params["scope"] = str(route_data["scope"])
+                if route_data.get("routingTable"):
+                    route_params["routing-table"] = route_data["routingTable"]
+                
+                # Log do comando que será enviado ao RouterOS
+                logger.info(f"📤 Enviando comando RouterOS: /ip/route/add")
+                logger.info(f"   Parâmetros: {route_params}")
+                cmd_str = " ".join([f"={k}={v}" for k, v in route_params.items()])
+                logger.info(f"   Comando completo: /ip/route/add {cmd_str}")
+                
+                result = route_resource.add(**route_params)
+                
+                # O resultado é um AsynchronousResponse com done_message['ret']
+                route_id_routeros = None
+                if hasattr(result, 'done_message'):
+                    route_id_routeros = result.done_message.get('ret')
+                elif isinstance(result, dict):
+                    route_id_routeros = result.get('ret')
+                
+                if not route_id_routeros:
+                    logger.error(f"❌ Rota adicionada mas ID não retornado. Resposta: {result}")
+                    raise Exception(f"ID da rota não retornado pelo RouterOS")
+                
+                logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id_routeros}")
+                
+                # Buscar a rota criada para obter o gateway usado pelo RouterOS
+                # Se gateway estava vazio, RouterOS pode ter usado a interface como gateway
+                created_routes = route_resource.get(id=route_id_routeros)
+                gateway_used = gateway  # Default: usar gateway fornecido
+                if created_routes and len(created_routes) > 0:
+                    created_route = created_routes[0]  # get() retorna uma lista
+                    gateway_from_routeros = created_route.get("gateway", "")
+                    interface_from_routeros = created_route.get("interface", "")
+                    
+                    # Se gateway estava vazio mas RouterOS retornou um gateway (provavelmente a interface)
+                    if not gateway and gateway_from_routeros:
+                        gateway_used = gateway_from_routeros
+                        logger.info(f"📝 RouterOS usou gateway: '{gateway_used}' (interface: '{interface_from_routeros}')")
+                    elif not gateway and interface_from_routeros:
+                        # Gateway vazio e RouterOS não retornou gateway - usar interface como gateway
+                        gateway_used = interface_from_routeros
+                        logger.info(f"📝 RouterOS usou interface como gateway: '{gateway_used}'")
+                
+                return (route_id_routeros, gateway_used)
+                    
+            except Exception as sync_error:
+                logger.error(f"❌ Erro ao executar comando no RouterOS: {sync_error}")
+                import traceback
+                logger.error(f"   Traceback: {traceback.format_exc()}")
+                raise
         
         loop = asyncio.get_event_loop()
-        route_id_routeros = await loop.run_in_executor(executor, add_route_sync)
+        result_tuple = await loop.run_in_executor(executor, add_route_sync)
+        
+        if not result_tuple or not result_tuple[0]:
+            await ws.send(json.dumps({"error": "Rota não foi adicionada - ID não retornado pelo RouterOS"}))
+            return
+        
+        route_id_routeros, gateway_used = result_tuple
         
         await ws.send(json.dumps({
             "success": True,
             "message": "Rota adicionada com sucesso",
-            "router_os_id": route_id_routeros
+            "router_os_id": route_id_routeros,
+            "gateway_used": gateway_used  # Gateway realmente usado pelo RouterOS
         }))
         
     except Exception as e:
