@@ -8,14 +8,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import HTTP_PORT, SYNC_INTERVAL_SECONDS, ROUTEROS_SERVER_ENDPOINT
+from config import HTTP_PORT, PORT, SYNC_INTERVAL_SECONDS, ROUTEROS_SERVER_ENDPOINT
 from models import AddRouteRequest, RemoveRouteRequest
 from monitor import background_sync_loop
 from routeros_websocket import (
     list_wireguard_interfaces,
     add_route_to_routeros,
     remove_route_from_routeros,
-    get_router_password
+    get_router_password,
+    start_websocket_server
 )
 from api_client import get_router_from_api, get_router_wireguard_peers_from_api
 
@@ -35,11 +36,20 @@ async def lifespan(app: FastAPI):
     # Iniciar loop de sincronização em background
     sync_task = asyncio.create_task(background_sync_loop())
     
+    # Iniciar servidor WebSocket em background
+    websocket_task = asyncio.create_task(start_websocket_server(host="0.0.0.0", port=PORT))
+    
     yield
     
+    # Cancelar tarefas
     sync_task.cancel()
+    websocket_task.cancel()
     try:
         await sync_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await websocket_task
     except asyncio.CancelledError:
         pass
     logger.info("🛑 Serviço RouterOS encerrado")
