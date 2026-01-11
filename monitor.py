@@ -7,7 +7,7 @@ import os
 import logging
 from typing import Dict, Any, List
 import httpx
-from config import API_C_SHARP_URL, SYNC_INTERVAL_SECONDS, MONITOR_INTERVAL_SECONDS
+from config import API_C_SHARP_URL, SYNC_INTERVAL_SECONDS, MONITOR_INTERVAL_SECONDS, ROUTEROS_SERVER_ENDPOINT
 from api_client import (
     get_all_routers_from_api,
     get_router_static_routes_from_api,
