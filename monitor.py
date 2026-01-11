@@ -279,15 +279,23 @@ async def retry_failed_routes(
                     result = await add_route_to_routeros(router_id, route_data)
                     
                     if result.get("success"):
-                        # Atualizar status para Applied via API, incluindo gateway usado pelo RouterOS
+                        # Atualizar status para Applied via API, sempre incluindo gateway usado pelo RouterOS
+                        # gateway_used sempre vem do RouterOS (pode ser IP ou nome de interface)
+                        # Se RouterOS não retornou gateway, usar o do banco como fallback
                         gateway_used = result.get("gateway_used")
+                        if not gateway_used:
+                            gateway_used = route_db.get("gateway", "")
+                        
+                        # Sempre passar o gateway quando atualizar status para Applied
+                        # Isso garante que o banco sempre tenha o valor real do RouterOS
+                        # Passar gateway mesmo se for string vazia (para manter sincronização)
                         await update_route_status_in_api(
                             router_id,
                             route_id,
                             3,  # Applied
                             result.get("router_os_id"),
                             None,  # error_message
-                            gateway_used  # gateway usado pelo RouterOS
+                            gateway_used  # gateway usado pelo RouterOS (sempre informado, mesmo se for IP já configurado)
                         )
                         logger.info(f"✅ Rota {route_id} reaplicada com sucesso (adicionada). Gateway usado: '{gateway_used}'")
                     else:

@@ -192,7 +192,10 @@ async def update_route_status_in_api(
                 payload["routerOsId"] = router_os_id
             if error_message:
                 payload["errorMessage"] = error_message
-            if gateway:
+            # Sempre enviar gateway quando fornecido (pode ser IP ou nome de interface)
+            # Isso garante que o banco sempre tenha o valor real do RouterOS
+            # Enviar mesmo se for string vazia, para garantir sincronização
+            if gateway is not None:
                 payload["gateway"] = gateway
                 
             response = await client.post(

@@ -156,24 +156,13 @@ async def add_route(request: AddRouteRequest):
         gateway_used = result.get("gateway_used")
         router_os_id = result.get("router_os_id")
         
-        # Atualizar status na API C# com o gateway usado pelo RouterOS
-        if gateway_used:
-            from api_client import update_route_status_in_api
-            await update_route_status_in_api(
-                request.router_id,
-                request.route_id,
-                3,  # Applied
-                router_os_id,
-                None,  # error_message
-                gateway_used  # gateway usado pelo RouterOS
-            )
-            logger.info(f"✅ Gateway atualizado na API C#: '{gateway_used}'")
-        
+        # Retornar resposta com gateway_used - o controller C# fará a atualização no banco
+        # Isso garante que o gateway seja sempre atualizado, mesmo se gateway_used for o nome da interface
         return {
             "success": True,
             "message": result.get("message"),
             "router_os_id": router_os_id,
-            "gateway_used": gateway_used  # Gateway realmente usado pelo RouterOS
+            "gateway_used": gateway_used or ""  # Gateway realmente usado pelo RouterOS (pode ser IP ou nome de interface)
         }
     else:
         raise HTTPException(status_code=500, detail=result.get("error", "Erro desconhecido"))
