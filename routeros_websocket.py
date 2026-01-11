@@ -15,6 +15,7 @@ from websockets.server import WebSocketServerProtocol
 # Importação do routeros-api
 # O pacote routeros-api versão 0.18.0 usa routeros_api.connect() ao invés de RouterOsApi()
 import routeros_api
+import unicodedata
 try:
     from routeros_api.exceptions import RouterOsApiConnectionError, RouterOsApiCommunicationError
 except ImportError:
@@ -43,7 +44,8 @@ router_connections: Dict[str, 'routeros_api.Connection'] = {}
 executor = ThreadPoolExecutor(max_workers=10)
 
 # Padrão para identificar rotas AUTOMAIS.IO
-AUTOMAIS_ROUTE_PATTERN = re.compile(r'AUTOMAIS\.IO NÃO APAGAR:\s*([a-f0-9\-]{36})', re.IGNORECASE)
+# Aceita tanto "NÃO" (com acento) quanto "NAO" (sem acento) para compatibilidade
+AUTOMAIS_ROUTE_PATTERN = re.compile(r'AUTOMAIS\.IO NA[OÕ] APAGAR:\s*([a-f0-9\-]{36})', re.IGNORECASE)
 
 
 def is_automais_route(comment: Optional[str]) -> bool:
@@ -97,6 +99,62 @@ def mask_password(password: str) -> str:
     if not password or len(password) <= 4:
         return "***" if password else "(vazia)"
     return f"{password[:2]}...{password[-2:]}"
+
+
+def normalize_comment_for_routeros(comment: str) -> str:
+    """Normaliza comentário para RouterOS removendo acentos e caracteres especiais
+    
+    RouterOS pode ter problemas com UTF-8, então convertemos para ASCII
+    removendo acentos e mantendo apenas caracteres ASCII seguros.
+    
+    Args:
+        comment: Comentário original (pode conter acentos)
+    
+    Returns:
+        Comentário normalizado sem acentos
+    """
+    if not comment:
+        return comment
+    
+    # Normalizar para NFD (decomposição) e remover marcas diacríticas
+    normalized = unicodedata.normalize('NFD', comment)
+    # Remover caracteres de combinação (acentos)
+    ascii_comment = ''.join(
+        char for char in normalized 
+        if unicodedata.category(char) != 'Mn'
+    )
+    
+    # Garantir que está em ASCII
+    try:
+        ascii_comment.encode('ascii')
+        return ascii_comment
+    except UnicodeEncodeError:
+        # Se ainda houver caracteres não-ASCII, substituir por equivalentes
+        replacements = {
+            'Ã': 'A', 'ã': 'a',
+            'Õ': 'O', 'õ': 'o',
+            'Ê': 'E', 'ê': 'e',
+            'É': 'E', 'é': 'e',
+            'Í': 'I', 'í': 'i',
+            'Ó': 'O', 'ó': 'o',
+            'Ú': 'U', 'ú': 'u',
+            'Ç': 'C', 'ç': 'c',
+            'À': 'A', 'à': 'a',
+            'Á': 'A', 'á': 'a',
+            'Â': 'A', 'â': 'a',
+            'Ô': 'O', 'ô': 'o',
+            'Ü': 'U', 'ü': 'u',
+        }
+        for old, new in replacements.items():
+            ascii_comment = ascii_comment.replace(old, new)
+        
+        # Tentar novamente
+        try:
+            ascii_comment.encode('ascii')
+            return ascii_comment
+        except UnicodeEncodeError:
+            # Último recurso: remover todos os caracteres não-ASCII
+            return ''.join(char for char in ascii_comment if ord(char) < 128)
 
 
 def generate_strong_password(length: int = 32) -> str:
@@ -386,29 +444,44 @@ async def get_router_connection(router_id: str, router_ip: str, username: str, p
 async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> Dict[str, Any]:
     """Adiciona rota estática no RouterOS (função reutilizável para HTTP e WebSocket)"""
     try:
+        logger.info(f"🔄 Iniciando adição de rota - Router: {router_id}, Route: {route_data.get('route_id')}")
+        logger.info(f"   Dados da rota: {route_data}")
+        
         # Buscar router da API
         router = await get_router_from_api(router_id)
         if not router:
+            logger.error(f"❌ Router {router_id} não encontrado na API")
             return {"success": False, "error": "Router não encontrado"}
+        
+        logger.debug(f"✅ Router encontrado: {router.get('name', 'N/A')}")
         
         # Buscar rotas do banco para obter o Comment
         routes = await get_router_static_routes_from_api(router_id)
         route_db = next((r for r in routes if r.get("id") == route_data.get("route_id")), None)
         
         if not route_db:
+            logger.error(f"❌ Rota {route_data.get('route_id')} não encontrada no banco de dados")
+            logger.debug(f"   Rotas disponíveis no banco: {[r.get('id') for r in routes]}")
             return {"success": False, "error": "Rota não encontrada no banco de dados"}
+        
+        logger.debug(f"✅ Rota encontrada no banco: {route_db.get('destination', 'N/A')}")
         
         # Obter IP do router via peer WireGuard
         router_ip = route_data.get("router_ip")
         if not router_ip:
+            logger.debug(f"🔍 Buscando IP do router via peer WireGuard...")
             peers = await get_router_wireguard_peers_from_api(router_id)
             if peers:
                 allowed_ips = peers[0].get("allowedIps", "")
                 if allowed_ips:
                     router_ip = allowed_ips.split(",")[0].strip().split("/")[0]
+                    logger.debug(f"✅ IP obtido do peer WireGuard: {router_ip}")
         
         if not router_ip:
+            logger.error(f"❌ IP do router não encontrado para router {router_id}")
             return {"success": False, "error": "IP do router não encontrado. Configure RouterOsApiUrl ou crie um peer WireGuard."}
+        
+        logger.info(f"🔌 Conectando ao RouterOS - IP: {router_ip}, User: {router.get('routerOsApiUsername', 'admin')}")
         
         # Conectar ao RouterOS (get_router_connection busca o router da API e usa a senha correta)
         # Passar senha vazia aqui, pois get_router_connection vai buscar o router completo da API
@@ -420,54 +493,80 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
         )
         
         if not api:
+            logger.error(f"❌ Falha ao conectar ao RouterOS {router_id} em {router_ip}")
             return {"success": False, "error": "Não foi possível conectar ao RouterOS"}
+        
+        logger.info(f"✅ Conectado ao RouterOS com sucesso")
         
         # Adicionar rota com comentário AUTOMAIS.IO (executar em thread)
         comment = route_db.get("comment", f"AUTOMAIS.IO NÃO APAGAR: {route_data.get('route_id')}")
+        # Normalizar comentário para RouterOS (remover acentos para evitar problemas de encoding)
+        comment_normalized = normalize_comment_for_routeros(comment)
+        logger.debug(f"📝 Comentário original: {comment}")
+        logger.debug(f"📝 Comentário normalizado: {comment_normalized}")
         
         def add_route_sync():
-            route_resource = api.get_resource('/ip/route')
-            route_params = {
-                "dst-address": route_data["destination"],  # Corrigido: RouterOS usa dst-address, não dst
-                "gateway": route_data["gateway"],
-                "comment": comment
-            }
-            
-            if route_data.get("interface_name"):
-                route_params["interface"] = route_data["interface_name"]
-            if route_data.get("distance"):
-                route_params["distance"] = str(route_data["distance"])
-            if route_data.get("scope"):
-                route_params["scope"] = str(route_data["scope"])
-            if route_data.get("routing_table"):
-                route_params["routing-table"] = route_data["routing_table"]
-            
-            # Log do comando que será enviado ao RouterOS
-            logger.info(f"📤 Enviando comando RouterOS: /ip/route/add")
-            logger.info(f"   Parâmetros: {route_params}")
-            cmd_str = " ".join([f"={k}={v}" for k, v in route_params.items()])
-            logger.info(f"   Comando completo: /ip/route/add {cmd_str}")
-            
-            result = route_resource.add(**route_params)
-            
-            # O resultado é um AsynchronousResponse com done_message['ret']
-            if hasattr(result, 'done_message'):
-                route_id = result.done_message.get('ret')
-                logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
-                return route_id
-            else:
-                # Fallback: tentar acessar diretamente se for dict
-                if isinstance(result, dict):
-                    route_id = result.get('ret')
-                    logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
-                    return route_id
+            try:
+                route_resource = api.get_resource('/ip/route')
+                route_params = {
+                    "dst-address": route_data["destination"],  # Corrigido: RouterOS usa dst-address, não dst
+                    "gateway": route_data["gateway"],
+                    "comment": comment_normalized  # Usar versão normalizada
+                }
+                
+                if route_data.get("interface_name"):
+                    route_params["interface"] = route_data["interface_name"]
+                if route_data.get("distance"):
+                    route_params["distance"] = str(route_data["distance"])
+                if route_data.get("scope"):
+                    route_params["scope"] = str(route_data["scope"])
+                if route_data.get("routing_table"):
+                    route_params["routing-table"] = route_data["routing_table"]
+                
+                # Log do comando que será enviado ao RouterOS
+                logger.info(f"📤 Enviando comando RouterOS: /ip/route/add")
+                logger.info(f"   Parâmetros: {route_params}")
+                cmd_str = " ".join([f"={k}={v}" for k, v in route_params.items()])
+                logger.info(f"   Comando completo: /ip/route/add {cmd_str}")
+                
+                result = route_resource.add(**route_params)
+                
+                # O resultado é um AsynchronousResponse com done_message['ret']
+                if hasattr(result, 'done_message'):
+                    route_id = result.done_message.get('ret')
+                    if route_id:
+                        logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
+                        return route_id
+                    else:
+                        logger.error(f"❌ Rota adicionada mas ID não retornado. Resposta: {result.done_message}")
+                        raise Exception(f"ID da rota não retornado pelo RouterOS. Resposta: {result.done_message}")
                 else:
-                    logger.error(f"❌ Formato de resposta inesperado: {type(result)} - {result}")
-                    return None
+                    # Fallback: tentar acessar diretamente se for dict
+                    if isinstance(result, dict):
+                        route_id = result.get('ret')
+                        if route_id:
+                            logger.info(f"✅ Rota adicionada com sucesso. ID RouterOS: {route_id}")
+                            return route_id
+                        else:
+                            logger.error(f"❌ Rota adicionada mas ID não retornado. Resposta: {result}")
+                            raise Exception(f"ID da rota não retornado pelo RouterOS. Resposta: {result}")
+                    else:
+                        logger.error(f"❌ Formato de resposta inesperado: {type(result)} - {result}")
+                        raise Exception(f"Formato de resposta inesperado do RouterOS: {type(result)} - {result}")
+            except Exception as sync_error:
+                logger.error(f"❌ Erro ao executar comando no RouterOS: {sync_error}")
+                import traceback
+                logger.error(f"   Traceback: {traceback.format_exc()}")
+                raise
         
         loop = asyncio.get_event_loop()
         route_id_routeros = await loop.run_in_executor(executor, add_route_sync)
         
+        if not route_id_routeros:
+            logger.error(f"❌ Rota não foi adicionada - route_id_routeros é None")
+            return {"success": False, "error": "Rota não foi adicionada - ID não retornado pelo RouterOS"}
+        
+        logger.info(f"✅ Rota adicionada com sucesso - RouterOS ID: {route_id_routeros}")
         return {
             "success": True,
             "message": "Rota adicionada com sucesso",
@@ -475,7 +574,9 @@ async def add_route_to_routeros(router_id: str, route_data: Dict[str, Any]) -> D
         }
         
     except Exception as e:
-        logger.error(f"Erro ao adicionar rota: {e}")
+        logger.error(f"❌ Erro ao adicionar rota: {e}")
+        import traceback
+        logger.error(f"   Traceback completo: {traceback.format_exc()}")
         return {"success": False, "error": str(e)}
 
 
@@ -557,13 +658,17 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
         
         # Adicionar rota com comentário AUTOMAIS.IO (executar em thread)
         comment = route_db.get("comment", f"AUTOMAIS.IO NÃO APAGAR: {route_db.get('id')}")
+        # Normalizar comentário para RouterOS (remover acentos para evitar problemas de encoding)
+        comment_normalized = normalize_comment_for_routeros(comment)
+        logger.debug(f"📝 Comentário original: {comment}")
+        logger.debug(f"📝 Comentário normalizado: {comment_normalized}")
         
         def add_route_sync():
             route_resource = api.get_resource('/ip/route')
             route_params = {
                 "dst-address": route_data["destination"],  # Corrigido: RouterOS usa dst-address, não dst
                 "gateway": route_data["gateway"],
-                "comment": comment
+                "comment": comment_normalized  # Usar versão normalizada
             }
             
             if route_data.get("interface"):
