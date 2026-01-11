@@ -6,9 +6,11 @@ import asyncio
 import json
 import logging
 import re
+import ssl
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -1295,11 +1297,42 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
         logger.error(f"Erro na conexão WebSocket: {e}")
 
 
-async def start_websocket_server(host: str = "0.0.0.0", port: int = 8765):
-    """Inicia servidor WebSocket"""
-    logger.info(f"🚀 Iniciando servidor WebSocket RouterOS em ws://{host}:{port}")
+def create_ssl_context():
+    """Cria contexto SSL usando certificados Let's Encrypt"""
+    if not ENABLE_SSL:
+        return None
     
-    async with websockets.serve(handle_websocket, host, port):
+    cert_path = Path(SSL_CERT_PATH)
+    key_path = Path(SSL_KEY_PATH)
+    
+    if not cert_path.exists() or not key_path.exists():
+        logger.warning(f"⚠️ Certificados SSL não encontrados: cert={cert_path.exists()}, key={key_path.exists()}")
+        logger.warning("   Servidor WebSocket iniciará sem SSL (ws://)")
+        return None
+    
+    try:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(cert_path, key_path)
+        logger.info(f"✅ SSL configurado: cert={SSL_CERT_PATH}, key={SSL_KEY_PATH}")
+        return ssl_context
+    except Exception as e:
+        logger.error(f"❌ Erro ao carregar certificados SSL: {e}")
+        logger.warning("   Servidor WebSocket iniciará sem SSL (ws://)")
+        return None
+
+
+async def start_websocket_server(host: str = "0.0.0.0", port: int = 8765):
+    """Inicia servidor WebSocket com suporte opcional a SSL (WSS)"""
+    ssl_context = create_ssl_context()
+    
+    if ssl_context:
+        protocol = "wss://"
+        logger.info(f"🔒 Iniciando servidor WebSocket RouterOS com SSL em {protocol}{host}:{port}")
+    else:
+        protocol = "ws://"
+        logger.info(f"🚀 Iniciando servidor WebSocket RouterOS em {protocol}{host}:{port}")
+    
+    async with websockets.serve(handle_websocket, host, port, ssl=ssl_context):
         await asyncio.Future()  # Rodar indefinidamente
 
 

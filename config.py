@@ -25,3 +25,10 @@ MAX_CONCURRENT_PINGS = int(os.getenv("MAX_CONCURRENT_PINGS", "10"))
 # Configurações de conexão RouterOS
 ROUTEROS_CONNECTION_TIMEOUT = int(os.getenv("ROUTEROS_CONNECTION_TIMEOUT", "30"))
 ROUTEROS_MAX_CONNECTIONS = int(os.getenv("ROUTEROS_MAX_CONNECTIONS", "10"))
+
+# Configurações SSL para WebSocket (WSS)
+# Caminhos dos certificados Let's Encrypt
+SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "/etc/letsencrypt/live/automais.io/fullchain.pem")
+SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "/etc/letsencrypt/live/automais.io/privkey.pem")
+# Se SSL está habilitado (usa certificados Let's Encrypt)
+ENABLE_SSL = os.getenv("ENABLE_SSL", "false").lower() == "true"
