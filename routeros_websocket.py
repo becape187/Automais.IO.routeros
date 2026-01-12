@@ -1299,8 +1299,15 @@ async def start_websocket_server(host: str = "0.0.0.0", port: int = 8765):
     """Inicia servidor WebSocket"""
     logger.info(f"🚀 Iniciando servidor WebSocket RouterOS em ws://{host}:{port}")
     
-    async with websockets.serve(handle_websocket, host, port):
-        await asyncio.Future()  # Rodar indefinidamente
+    try:
+        async with websockets.serve(handle_websocket, host, port):
+            await asyncio.Future()  # Rodar indefinidamente
+    except asyncio.CancelledError:
+        logger.info("🛑 Servidor WebSocket RouterOS cancelado")
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro no servidor WebSocket RouterOS: {e}")
+        raise
 
 
 if __name__ == "__main__":
