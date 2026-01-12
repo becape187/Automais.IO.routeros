@@ -1236,6 +1236,8 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                 action = data.get("action")
                 router_id = data.get("router_id")
                 
+                logger.info(f"📨 Mensagem recebida: action={action}, router_id={router_id}")
+                
                 if not action or not router_id:
                     await ws.send(json.dumps({"error": "action e router_id são obrigatórios"}))
                     continue
@@ -1243,27 +1245,48 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                 # Buscar router da API
                 router = await get_router_from_api(router_id)
                 if not router:
+                    logger.error(f"Router {router_id} não encontrado na API")
                     await ws.send(json.dumps({"error": "Router não encontrado"}))
                     continue
                 
+                logger.info(f"Router encontrado: routerOsApiUrl={router.get('routerOsApiUrl', 'não configurado')}")
+                
                 # Obter IP do router (via peer WireGuard ou RouterOsApiUrl)
                 router_ip = data.get("router_ip")
+                logger.info(f"router_ip da mensagem: {router_ip}")
+                
                 if not router_ip:
                     # Tentar extrair do RouterOsApiUrl
-                    router_ip = router.get("routerOsApiUrl", "").split(":")[0] if router.get("routerOsApiUrl") else None
+                    router_os_api_url = router.get("routerOsApiUrl", "")
+                    if router_os_api_url:
+                        logger.info(f"Tentando extrair IP de routerOsApiUrl: {router_os_api_url}")
+                        # Remover protocolo se presente (http:// ou https://)
+                        router_os_api_url = router_os_api_url.replace("http://", "").replace("https://", "")
+                        # Pegar apenas o hostname/IP (antes de : ou /)
+                        router_ip = router_os_api_url.split(":")[0].split("/")[0].strip()
+                        logger.info(f"IP extraído do routerOsApiUrl: {router_ip}")
                 
                 # Se ainda não tem IP, buscar do peer WireGuard
                 if not router_ip:
+                    logger.info(f"Buscando IP do peer WireGuard para router {router_id}")
                     peers = await get_router_wireguard_peers_from_api(router_id)
                     if peers:
+                        logger.info(f"Peers encontrados: {len(peers)}")
                         # Extrair IP do primeiro peer (formato: "10.222.111.2/32" -> "10.222.111.2")
                         allowed_ips = peers[0].get("allowedIps", "")
                         if allowed_ips:
                             router_ip = allowed_ips.split(",")[0].strip().split("/")[0]
+                            logger.info(f"IP extraído do peer WireGuard: {router_ip}")
+                    else:
+                        logger.warning(f"Nenhum peer WireGuard encontrado para router {router_id}")
                 
                 if not router_ip:
-                    await ws.send(json.dumps({"error": "IP do router não encontrado. Configure RouterOsApiUrl ou crie um peer WireGuard."}))
+                    error_msg = f"IP do router não encontrado para router {router_id}. Configure RouterOsApiUrl ou crie um peer WireGuard."
+                    logger.error(error_msg)
+                    await ws.send(json.dumps({"error": error_msg}))
                     continue
+                
+                logger.info(f"✅ Usando router_ip={router_ip} para router {router_id}, action={action}")
                 
                 username = router.get("routerOsApiUsername", "admin")
                 # Usar função auxiliar para obter senha correta (AutomaisApiPassword ou RouterOsApiPassword)
