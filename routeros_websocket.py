@@ -874,7 +874,8 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
                     return
             except Exception as e:
                 logger.error(f"❌ Erro ao detectar interface WireGuard: {e}")
-                await ws.send(json.dumps({"error": f"Erro ao detectar interface WireGuard: {str(e)}"}))
+                error_msg = sanitize_routeros_data(f"Erro ao detectar interface WireGuard: {str(e)}")
+                await ws.send(json.dumps({"error": error_msg}, ensure_ascii=False))
                 return
         
         if not gateway and not interface_name:
@@ -1006,7 +1007,8 @@ async def handle_add_route(router_id: str, route_data: Dict[str, Any], ws: WebSo
         
     except Exception as e:
         logger.error(f"Erro ao adicionar rota: {e}")
-        await ws.send(json.dumps({"error": str(e)}))
+        error_message = sanitize_routeros_data(str(e))
+        await ws.send(json.dumps({"error": error_message}, ensure_ascii=False))
 
 
 async def list_wireguard_interfaces(router_id: str, router_ip: str, username: str, password: str) -> List[Dict[str, Any]]:
@@ -1114,7 +1116,8 @@ async def handle_list_routes(router_id: str, router_ip: str, username: str, pass
         
     except Exception as e:
         logger.error(f"Erro ao listar rotas: {e}")
-        await ws.send(json.dumps({"error": str(e)}))
+        error_message = sanitize_routeros_data(str(e))
+        await ws.send(json.dumps({"error": error_message}, ensure_ascii=False))
 
 
 async def handle_delete_route(router_id: str, router_ip: str, username: str, password: str, route_routeros_id: str, ws: WebSocketServerProtocol):
@@ -1146,7 +1149,8 @@ async def handle_delete_route(router_id: str, router_ip: str, username: str, pas
         
     except Exception as e:
         logger.error(f"Erro ao remover rota: {e}")
-        await ws.send(json.dumps({"error": str(e)}))
+        error_message = sanitize_routeros_data(str(e))
+        await ws.send(json.dumps({"error": error_message}, ensure_ascii=False))
 
 
 async def handle_get_status(router_id: str, router_ip: str, username: str, password: str, ws: WebSocketServerProtocol, request_id: str = None):
@@ -1202,11 +1206,12 @@ async def handle_get_status(router_id: str, router_ip: str, username: str, passw
         
     except Exception as e:
         logger.error(f"Erro ao verificar status: {e}")
+        error_message = sanitize_routeros_data(str(e))
         await ws.send(json.dumps({
             "success": False,
             "connected": False,
-            "error": str(e)
-        }))
+            "error": error_message
+        }, ensure_ascii=False))
 
 
 async def handle_execute_command(router_id: str, router_ip: str, username: str, password: str, command: str, ws: WebSocketServerProtocol, request_id: str = None):
@@ -1293,10 +1298,19 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
         
     except Exception as e:
         logger.error(f"Erro ao executar comando: {e}")
-        error_response = {"success": False, "error": str(e)}
+        # Sanitizar mensagem de erro antes de enviar
+        error_message = str(e)
+        try:
+            # Tentar sanitizar a mensagem de erro
+            error_message = sanitize_routeros_data(error_message)
+        except:
+            # Se falhar, usar mensagem genérica
+            error_message = "Erro ao executar comando no RouterOS"
+        
+        error_response = {"success": False, "error": error_message}
         if request_id:
             error_response["id"] = request_id
-        await ws.send(json.dumps(error_response))
+        await ws.send(json.dumps(error_response, ensure_ascii=False))
 
 
 async def handle_websocket(ws: WebSocketServerProtocol, path: str):
@@ -1384,7 +1398,8 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                 await ws.send(json.dumps({"error": "JSON inválido"}))
             except Exception as e:
                 logger.error(f"Erro ao processar mensagem: {e}")
-                await ws.send(json.dumps({"error": str(e)}))
+                error_message = sanitize_routeros_data(str(e))
+        await ws.send(json.dumps({"error": error_message}, ensure_ascii=False))
                 
     except websockets.exceptions.ConnectionClosed:
         logger.info(f"Conexão WebSocket fechada: {ws.remote_address}")
