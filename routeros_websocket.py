@@ -157,6 +157,71 @@ def normalize_comment_for_routeros(comment: str) -> str:
             return ''.join(char for char in ascii_comment if ord(char) < 128)
 
 
+def sanitize_routeros_data(data):
+    """Sanitiza dados do RouterOS para garantir codificação UTF-8 válida
+    
+    Converte recursivamente todos os valores de string para UTF-8 válido,
+    tratando possíveis problemas de codificação (latin1, cp1252, etc.)
+    
+    Args:
+        data: Dados do RouterOS (dict, list, str, ou outros tipos)
+    
+    Returns:
+        Dados sanitizados com strings em UTF-8 válido
+    """
+    if isinstance(data, dict):
+        return {key: sanitize_routeros_data(value) for key, value in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_routeros_data(item) for item in data]
+    elif isinstance(data, str):
+        # Se já é uma string válida, retornar como está
+        try:
+            data.encode('utf-8')
+            return data
+        except (UnicodeEncodeError, UnicodeDecodeError, UnicodeError):
+            # Se não é UTF-8 válido, tentar corrigir
+            pass
+        
+        # Tentar corrigir problemas de codificação
+        # O erro comum é quando dados latin1/iso-8859-1 são interpretados como UTF-8
+        try:
+            # Estratégia: codificar como latin1 (que sempre funciona para qualquer string)
+            # e depois tentar decodificar como UTF-8
+            # Isso funciona porque latin1 mapeia cada byte 0-255 para um caractere Unicode
+            fixed_bytes = data.encode('latin1', errors='replace')
+            # Tentar decodificar como UTF-8
+            fixed = fixed_bytes.decode('utf-8', errors='replace')
+            # Verificar se o resultado é válido UTF-8
+            fixed.encode('utf-8')
+            return fixed
+        except (UnicodeDecodeError, UnicodeEncodeError, UnicodeError):
+            # Se não funcionou, usar replace para substituir caracteres inválidos
+            try:
+                return data.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+            except:
+                # Último recurso: substituir caracteres problemáticos manualmente
+                result = []
+                for char in data:
+                    try:
+                        char.encode('utf-8')
+                        result.append(char)
+                    except:
+                        result.append('?')
+                return ''.join(result)
+    elif isinstance(data, bytes):
+        # Se for bytes, tentar decodificar
+        try:
+            return data.decode('utf-8', errors='replace')
+        except:
+            try:
+                return data.decode('latin1', errors='replace')
+            except:
+                return data.decode('utf-8', errors='ignore')
+    else:
+        # Outros tipos (int, float, bool, None) retornar como estão
+        return data
+
+
 def generate_strong_password(length: int = 32) -> str:
     """Gera uma senha forte aleatória"""
     # Caracteres permitidos: letras maiúsculas, minúsculas, números e símbolos especiais
@@ -1007,6 +1072,9 @@ async def handle_list_routes(router_id: str, router_ip: str, username: str, pass
         loop = asyncio.get_event_loop()
         routes = await loop.run_in_executor(executor, get_routes_sync)
         
+        # Sanitizar dados do RouterOS para garantir UTF-8 válido
+        routes = sanitize_routeros_data(routes)
+        
         # Buscar rotas do banco para mapear
         routes_db = await get_router_static_routes_from_api(router_id)
         routes_db_map = {r.get("id"): r for r in routes_db}
@@ -1042,7 +1110,7 @@ async def handle_list_routes(router_id: str, router_ip: str, username: str, pass
         await ws.send(json.dumps({
             "success": True,
             "routes": processed_routes
-        }))
+        }, ensure_ascii=False))
         
     except Exception as e:
         logger.error(f"Erro ao listar rotas: {e}")
@@ -1120,14 +1188,17 @@ async def handle_get_status(router_id: str, router_ip: str, username: str, passw
         loop = asyncio.get_event_loop()
         status = await loop.run_in_executor(executor, get_status_sync)
         
+        # Sanitizar dados do RouterOS para garantir UTF-8 válido
+        sanitized_status = sanitize_routeros_data(status)
+        
         response = {
-            "success": status.get("connected", False),
-            **status
+            "success": sanitized_status.get("connected", False),
+            **sanitized_status
         }
         if request_id:
             response["id"] = request_id
         
-        await ws.send(json.dumps(response))
+        await ws.send(json.dumps(response, ensure_ascii=False))
         
     except Exception as e:
         logger.error(f"Erro ao verificar status: {e}")
@@ -1210,12 +1281,15 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(executor, execute_command_sync)
         
+        # Sanitizar dados do RouterOS para garantir UTF-8 válido
+        sanitized_result = sanitize_routeros_data(result)
+        
         # Incluir ID da requisição se fornecido
-        response = {"success": True, "data": result}
+        response = {"success": True, "data": sanitized_result}
         if request_id:
             response["id"] = request_id
         
-        await ws.send(json.dumps(response))
+        await ws.send(json.dumps(response, ensure_ascii=False))
         
     except Exception as e:
         logger.error(f"Erro ao executar comando: {e}")
