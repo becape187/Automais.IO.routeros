@@ -1354,9 +1354,6 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
                 params[key] = value
         
         def execute_command_sync():
-            # Log para debug
-            logger.debug(f"Executando comando: resource_path={resource_path}, action={action}, params={params}")
-            
             resource = api.get_resource(resource_path)
             
             if action == "print":
@@ -1429,7 +1426,6 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
 async def handle_websocket(ws: WebSocketServerProtocol, path: str):
     """Handler principal do WebSocket"""
     client_addr = f"{ws.remote_address[0]}:{ws.remote_address[1]}" if ws.remote_address else "unknown"
-    logger.info(f"🔌 Nova conexão WebSocket de {client_addr}")
     
     try:
         async for message in ws:
@@ -1438,8 +1434,6 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                 action = data.get("action")
                 router_id = data.get("router_id")
                 request_id = data.get("id")
-                
-                logger.debug(f"📨 Mensagem recebida de {client_addr}: action={action}, router_id={router_id}, id={request_id}")
                 
                 if not action or not router_id:
                     await ws.send(json.dumps({"error": "action e router_id são obrigatórios"}))
@@ -1489,8 +1483,6 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                     await ws.send(json.dumps({"error": error_msg}))
                     continue
                 
-                logger.info(f"✅ Usando router_ip={router_ip} para router {router_id}, action={action}")
-                
                 username = router.get("routerOsApiUsername", "admin")
                 # Usar função auxiliar para obter senha correta (AutomaisApiPassword ou RouterOsApiPassword)
                 password = get_router_password(router)
@@ -1510,14 +1502,14 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                     await ws.send(json.dumps({"error": f"Ação '{action}' não reconhecida"}))
                     
             except json.JSONDecodeError as e:
-                logger.error(f"❌ JSON inválido de {client_addr}: {e}")
+                logger.error(f"JSON inválido: {e}")
                 error_response = {"error": "JSON inválido", "success": False}
                 try:
                     await ws.send(json.dumps(error_response))
                 except:
                     logger.warning(f"Não foi possível enviar resposta de erro (conexão fechada?)")
             except Exception as e:
-                logger.error(f"❌ Erro ao processar mensagem de {client_addr}: {type(e).__name__}: {e}")
+                logger.error(f"Erro ao processar mensagem: {type(e).__name__}: {e}")
                 import traceback
                 logger.debug(f"Traceback: {traceback.format_exc()}")
                 error_message = sanitize_routeros_data(str(e))
@@ -1534,12 +1526,13 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                 except:
                     logger.warning(f"Não foi possível enviar resposta de erro (conexão fechada?)")
                 
-    except websockets.exceptions.ConnectionClosed as e:
-        logger.info(f"🔌 Conexão WebSocket fechada de {client_addr}: código={e.code}, motivo='{e.reason}'")
+    except websockets.exceptions.ConnectionClosed:
+        # Conexão fechada normalmente - não logar
+        pass
     except websockets.exceptions.ConnectionClosedError as e:
-        logger.warning(f"⚠️ Erro de conexão WebSocket de {client_addr}: {e}")
+        logger.warning(f"Erro de conexão WebSocket: {e}")
     except Exception as e:
-        logger.error(f"❌ Erro inesperado na conexão WebSocket de {client_addr}: {type(e).__name__}: {e}")
+        logger.error(f"Erro inesperado na conexão WebSocket: {type(e).__name__}: {e}")
         import traceback
         logger.debug(f"Traceback: {traceback.format_exc()}")
 
