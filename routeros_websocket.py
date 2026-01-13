@@ -1156,7 +1156,11 @@ async def handle_delete_route(router_id: str, router_ip: str, username: str, pas
 async def handle_get_status(router_id: str, router_ip: str, username: str, password: str, ws: WebSocketServerProtocol, request_id: str = None):
     """Verifica status da conexão RouterOS"""
     try:
-        api = await get_router_connection(router_id, router_ip, username, password)
+        # Timeout de 8 segundos para get_status (deve ser rápido)
+        api = await asyncio.wait_for(
+            get_router_connection(router_id, router_ip, username, password),
+            timeout=8.0
+        )
         if not api:
             response = {
                 "success": False,
@@ -1184,13 +1188,18 @@ async def handle_get_status(router_id: str, router_ip: str, username: str, passw
                     "router_ip": router_ip
                 }
             except Exception as e:
+                logger.warning(f"Erro ao obter status do RouterOS: {e}")
                 return {
                     "connected": False,
                     "error": str(e)
                 }
         
         loop = asyncio.get_event_loop()
-        status = await loop.run_in_executor(executor, get_status_sync)
+        # Timeout de 5 segundos para a operação síncrona
+        status = await asyncio.wait_for(
+            loop.run_in_executor(executor, get_status_sync),
+            timeout=5.0
+        )
         
         # Sanitizar dados do RouterOS para garantir UTF-8 válido
         sanitized_status = sanitize_routeros_data(status)
@@ -1204,14 +1213,28 @@ async def handle_get_status(router_id: str, router_ip: str, username: str, passw
         
         await ws.send(json.dumps(response, ensure_ascii=False))
         
-    except Exception as e:
-        logger.error(f"Erro ao verificar status: {e}")
-        error_message = sanitize_routeros_data(str(e))
-        await ws.send(json.dumps({
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout ao verificar status do router {router_id}")
+        error_message = "Timeout ao verificar status (operação demorou mais de 5 segundos)"
+        response = {
             "success": False,
             "connected": False,
             "error": error_message
-        }, ensure_ascii=False))
+        }
+        if request_id:
+            response["id"] = request_id
+        await ws.send(json.dumps(response, ensure_ascii=False))
+    except Exception as e:
+        logger.error(f"Erro ao verificar status: {e}")
+        error_message = sanitize_routeros_data(str(e))
+        response = {
+            "success": False,
+            "connected": False,
+            "error": error_message
+        }
+        if request_id:
+            response["id"] = request_id
+        await ws.send(json.dumps(response, ensure_ascii=False))
 
 
 async def handle_execute_command(router_id: str, router_ip: str, username: str, password: str, command: str, ws: WebSocketServerProtocol, request_id: str = None):
@@ -1343,7 +1366,11 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
                 raise ValueError(f"Ação '{action}' não suportada. Ações suportadas: print, enable, disable, remove, add, set")
         
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(executor, execute_command_sync)
+        # Timeout de 60 segundos para comandos (alguns podem demorar)
+        result = await asyncio.wait_for(
+            loop.run_in_executor(executor, execute_command_sync),
+            timeout=60.0
+        )
         
         # Sanitizar dados do RouterOS para garantir UTF-8 válido
         sanitized_result = sanitize_routeros_data(result)
@@ -1355,6 +1382,13 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
         
         await ws.send(json.dumps(response, ensure_ascii=False))
         
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout ao executar comando no router {router_id}: {command[:50]}...")
+        error_message = "Timeout ao executar comando (operação demorou mais de 60 segundos)"
+        error_response = {"success": False, "error": error_message}
+        if request_id:
+            error_response["id"] = request_id
+        await ws.send(json.dumps(error_response, ensure_ascii=False))
     except Exception as e:
         logger.error(f"Erro ao executar comando: {e}")
         # Sanitizar mensagem de erro antes de enviar
@@ -1374,7 +1408,8 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
 
 async def handle_websocket(ws: WebSocketServerProtocol, path: str):
     """Handler principal do WebSocket"""
-    logger.info(f"Nova conexão WebSocket: {ws.remote_address}")
+    client_addr = f"{ws.remote_address[0]}:{ws.remote_address[1]}" if ws.remote_address else "unknown"
+    logger.info(f"🔌 Nova conexão WebSocket de {client_addr}")
     
     try:
         async for message in ws:
@@ -1382,8 +1417,9 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                 data = json.loads(message)
                 action = data.get("action")
                 router_id = data.get("router_id")
+                request_id = data.get("id")
                 
-                logger.info(f"📨 Mensagem recebida: action={action}, router_id={router_id}")
+                logger.debug(f"📨 Mensagem recebida de {client_addr}: action={action}, router_id={router_id}, id={request_id}")
                 
                 if not action or not router_id:
                     await ws.send(json.dumps({"error": "action e router_id são obrigatórios"}))
@@ -1453,17 +1489,39 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                 else:
                     await ws.send(json.dumps({"error": f"Ação '{action}' não reconhecida"}))
                     
-            except json.JSONDecodeError:
-                await ws.send(json.dumps({"error": "JSON inválido"}))
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ JSON inválido de {client_addr}: {e}")
+                error_response = {"error": "JSON inválido", "success": False}
+                try:
+                    await ws.send(json.dumps(error_response))
+                except:
+                    logger.warning(f"Não foi possível enviar resposta de erro (conexão fechada?)")
             except Exception as e:
-                logger.error(f"Erro ao processar mensagem: {e}")
+                logger.error(f"❌ Erro ao processar mensagem de {client_addr}: {type(e).__name__}: {e}")
+                import traceback
+                logger.debug(f"Traceback: {traceback.format_exc()}")
                 error_message = sanitize_routeros_data(str(e))
-        await ws.send(json.dumps({"error": error_message}, ensure_ascii=False))
+                error_response = {"error": error_message, "success": False}
+                # Tentar obter request_id da mensagem se possível
+                try:
+                    parsed_data = json.loads(message) if isinstance(message, str) else {}
+                    if parsed_data.get("id"):
+                        error_response["id"] = parsed_data["id"]
+                except:
+                    pass
+                try:
+                    await ws.send(json.dumps(error_response, ensure_ascii=False))
+                except:
+                    logger.warning(f"Não foi possível enviar resposta de erro (conexão fechada?)")
                 
-    except websockets.exceptions.ConnectionClosed:
-        logger.info(f"Conexão WebSocket fechada: {ws.remote_address}")
+    except websockets.exceptions.ConnectionClosed as e:
+        logger.info(f"🔌 Conexão WebSocket fechada de {client_addr}: código={e.code}, motivo='{e.reason}'")
+    except websockets.exceptions.ConnectionClosedError as e:
+        logger.warning(f"⚠️ Erro de conexão WebSocket de {client_addr}: {e}")
     except Exception as e:
-        logger.error(f"Erro na conexão WebSocket: {e}")
+        logger.error(f"❌ Erro inesperado na conexão WebSocket de {client_addr}: {type(e).__name__}: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
 
 
 async def start_websocket_server(host: str = "0.0.0.0", port: int = 8765):
