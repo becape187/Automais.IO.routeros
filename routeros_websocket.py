@@ -1223,11 +1223,12 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
             return
         
         # Parse do comando RouterOS
+        # Suporta dois formatos:
+        #   1. Formato API (com barras): /ip/firewall/filter/add
+        #   2. Formato linha de comando (com espaços): /ip firewall filter add
         # Exemplos:
         #   /ip/firewall/filter/print
-        #   /ip/firewall/filter/enable .id=*
-        #   /ip/firewall/filter/disable .id=*
-        #   /ip/firewall/filter/remove .id=*
+        #   /ip firewall filter add chain=input action=accept
         #   /ip/route/print
         #   /interface/print
         
@@ -1238,18 +1239,76 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
             await ws.send(json.dumps({"success": False, "error": "Comando inválido. Deve começar com /"}))
             return
         
-        # Extrair caminho do recurso e ação
-        path_parts = parts[0].split("/")
-        if len(path_parts) < 3:
-            await ws.send(json.dumps({"success": False, "error": "Comando inválido. Formato: /categoria/recurso/acao"}))
-            return
+        # Verificar se o primeiro elemento já contém o caminho completo (formato API)
+        first_part = parts[0]
+        if "/" in first_part and first_part.count("/") >= 3:
+            # Formato API: /ip/firewall/filter/add
+            path_parts = first_part.split("/")
+            resource_path = "/" + "/".join(path_parts[1:-1])
+            action = path_parts[-1]
+            # Parâmetros começam do segundo elemento
+            param_start_idx = 1
+        else:
+            # Formato linha de comando: /ip firewall filter add
+            # Encontrar onde termina o caminho (ação) e começam os parâmetros
+            # Ações comuns: add, print, remove, set, enable, disable, etc.
+            actions = ["add", "print", "remove", "set", "enable", "disable", "comment", "move", "get", "export", "find", "reset", "monitor", "ping", "traceroute"]
+            
+            path_elements = []
+            action = None
+            param_start_idx = len(parts)
+            
+            for i, part in enumerate(parts):
+                # Se encontrar uma ação conhecida, é o fim do caminho
+                if part.lower() in actions:
+                    path_elements.append(part)
+                    action = part.lower()
+                    param_start_idx = i + 1
+                    break
+                # Se encontrar um parâmetro (contém =), o caminho terminou antes
+                elif "=" in part:
+                    # O elemento anterior era a ação (ou o caminho não tem ação explícita)
+                    if i > 0:
+                        # Tentar identificar ação do elemento anterior
+                        prev_part = parts[i-1].lower()
+                        if prev_part in actions:
+                            action = prev_part
+                            param_start_idx = i
+                        else:
+                            # Sem ação explícita, assumir "print" como padrão
+                            action = "print"
+                            param_start_idx = i
+                    else:
+                        # Primeiro elemento tem =, comando inválido
+                        await ws.send(json.dumps({"success": False, "error": "Comando inválido. Formato esperado: /categoria recurso acao ou /categoria/recurso/acao"}))
+                        return
+                    break
+                else:
+                    # É parte do caminho
+                    path_elements.append(part)
+            
+            # Se não encontrou ação nem parâmetros, assumir "print"
+            if not action:
+                action = "print"
+                param_start_idx = len(parts)
+            
+            # Construir caminho do recurso (remover a barra inicial e a ação)
+            if path_elements:
+                # Remover barra inicial do primeiro elemento se existir
+                first_elem = path_elements[0].lstrip("/")
+                path_elements[0] = first_elem
+                # Remover a ação se estiver no final
+                if path_elements and path_elements[-1].lower() == action:
+                    path_elements = path_elements[:-1]
+                # Construir caminho
+                resource_path = "/" + "/".join(path_elements)
+            else:
+                await ws.send(json.dumps({"success": False, "error": "Comando inválido. Caminho do recurso não encontrado"}))
+                return
         
-        resource_path = "/" + "/".join(path_parts[1:-1])
-        action = path_parts[-1]
-        
-        # Parsear parâmetros (ex: .id=*, .id=123, etc)
+        # Parsear parâmetros (ex: chain=input, .id=123, etc)
         params = {}
-        for part in parts[1:]:
+        for part in parts[param_start_idx:]:
             if "=" in part:
                 key, value = part.split("=", 1)
                 params[key] = value
