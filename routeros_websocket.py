@@ -1264,11 +1264,28 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
         
         # Verificar se o primeiro elemento já contém o caminho completo (formato API)
         first_part = parts[0]
-        if "/" in first_part and first_part.count("/") >= 3:
-            # Formato API: /ip/firewall/filter/add
-            path_parts = first_part.split("/")
-            resource_path = "/" + "/".join(path_parts[1:-1])
-            action = path_parts[-1]
+        # Verificar se tem pelo menos 2 barras (ex: /interface/print tem 2 barras, /ip/firewall/filter/add tem 4)
+        # Split por "/" retorna: ["", "categoria", "recurso", "acao"] para /categoria/recurso/acao
+        path_parts = first_part.split("/")
+        # Se tem pelo menos 3 elementos após split (incluindo o vazio inicial), é formato API
+        # Ex: "/interface/print" -> ["", "interface", "print"] = 3 elementos
+        # Ex: "/ip/firewall/filter/add" -> ["", "ip", "firewall", "filter", "add"] = 5 elementos
+        if len(path_parts) >= 3:
+            # Formato API: /ip/firewall/filter/add ou /interface/print
+            # Remover primeiro elemento vazio (antes da primeira barra)
+            path_parts_clean = [p for p in path_parts if p]  # Remove strings vazias
+            if len(path_parts_clean) >= 2:
+                # Último elemento é a ação
+                action = path_parts_clean[-1]
+                # Resto é o caminho do recurso
+                resource_path = "/" + "/".join(path_parts_clean[:-1])
+            elif len(path_parts_clean) == 1:
+                # Apenas uma parte (ex: /interface) - assumir print
+                resource_path = "/" + path_parts_clean[0]
+                action = "print"
+            else:
+                await ws.send(json.dumps({"success": False, "error": "Comando inválido. Caminho vazio"}))
+                return
             # Parâmetros começam do segundo elemento
             param_start_idx = 1
         else:
@@ -1337,6 +1354,9 @@ async def handle_execute_command(router_id: str, router_ip: str, username: str, 
                 params[key] = value
         
         def execute_command_sync():
+            # Log para debug
+            logger.debug(f"Executando comando: resource_path={resource_path}, action={action}, params={params}")
+            
             resource = api.get_resource(resource_path)
             
             if action == "print":
