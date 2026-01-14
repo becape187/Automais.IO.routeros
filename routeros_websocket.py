@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 import websockets
@@ -29,7 +29,8 @@ from api_client import (
     get_router_from_api,
     get_router_static_routes_from_api,
     get_router_wireguard_peers_from_api,
-    update_router_password_in_api
+    update_router_password_in_api,
+    update_router_data_in_api
 )
 from config import API_C_SHARP_URL
 import secrets
@@ -1229,6 +1230,70 @@ async def handle_get_status(router_id: str, router_ip: str, username: str, passw
         
         # Sanitizar dados do RouterOS para garantir UTF-8 válido
         sanitized_status = sanitize_routeros_data(status)
+        
+        # Se conectado com sucesso, extrair e atualizar dados do router no banco
+        if sanitized_status.get("connected", False):
+            try:
+                resource = sanitized_status.get("resource", {})
+                identity = sanitized_status.get("identity", {})
+                
+                # Preparar dados para atualização
+                router_update_data = {
+                    "status": 1  # RouterStatus.Online
+                }
+                
+                # LastSeenAt - quando foi visto online
+                router_update_data["lastSeenAt"] = datetime.now(timezone.utc).isoformat()
+                
+                # Extrair dados do resource (hardware info)
+                if resource:
+                    hardware_info = {}
+                    
+                    # CPU Load
+                    if "cpu-load" in resource:
+                        hardware_info["cpuLoad"] = str(resource["cpu-load"])
+                    
+                    # Memory
+                    if "free-memory" in resource and "total-memory" in resource:
+                        free_mem = int(resource["free-memory"])
+                        total_mem = int(resource["total-memory"])
+                        used_mem = total_mem - free_mem
+                        hardware_info["memoryUsage"] = str(used_mem)
+                        hardware_info["totalMemory"] = str(total_mem)
+                    
+                    # Uptime
+                    if "uptime" in resource:
+                        hardware_info["uptime"] = str(resource["uptime"])
+                    
+                    # Temperature (se disponível)
+                    if "temperature" in resource:
+                        hardware_info["temperature"] = str(resource["temperature"])
+                    else:
+                        hardware_info["temperature"] = None
+                    
+                    # Last updated timestamp
+                    hardware_info["lastUpdated"] = datetime.now(timezone.utc).isoformat()
+                    
+                    # Converter para JSON string
+                    router_update_data["hardwareInfo"] = json.dumps(hardware_info)
+                    
+                    # Firmware Version
+                    if "version" in resource:
+                        router_update_data["firmwareVersion"] = str(resource["version"])
+                    
+                    # Model (board-name ou architecture)
+                    if "board-name" in resource:
+                        router_update_data["model"] = str(resource["board-name"])
+                    elif "architecture-name" in resource:
+                        router_update_data["model"] = str(resource["architecture-name"])
+                
+                # Atualizar no banco (em background, não bloquear resposta)
+                asyncio.create_task(update_router_data_in_api(router_id, router_update_data))
+                logger.debug(f"📤 Dados do router {router_id} sendo atualizados no banco: {list(router_update_data.keys())}")
+                
+            except Exception as update_error:
+                logger.warning(f"⚠️ Erro ao atualizar dados do router {router_id} no banco: {update_error}")
+                # Não falhar a resposta, apenas logar o erro
         
         response = {
             "success": sanitized_status.get("connected", False),

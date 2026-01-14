@@ -233,3 +233,46 @@ async def delete_route_from_api(router_id: str, route_id: str) -> bool:
     except Exception as e:
         logger.error(f"Erro ao deletar rota {route_id} do banco: {e}")
         return False
+
+
+async def update_router_data_in_api(router_id: str, data: Dict[str, Any]) -> bool:
+    """
+    Atualiza dados do router no banco via API C#
+    
+    Campos suportados:
+    - status: RouterStatus (1=Online, 2=Offline)
+    - lastSeenAt: DateTime (quando foi visto online pela última vez)
+    - latency: int (latência do ping em ms)
+    - hardwareInfo: string (JSON com informações de hardware)
+    - firmwareVersion: string
+    - model: string
+    """
+    try:
+        verify_ssl = os.getenv("API_C_SHARP_VERIFY_SSL", "true").lower() == "true"
+        url = f"{API_C_SHARP_URL}/api/routers/{router_id}"
+        
+        async with httpx.AsyncClient(timeout=30.0, verify=verify_ssl) as client:
+            response = await client.put(
+                url,
+                json=data,
+                headers={"Accept": "application/json", "Content-Type": "application/json"}
+            )
+            
+            if response.status_code == 200:
+                logger.debug(f"✅ Dados do router {router_id} atualizados: {list(data.keys())}")
+                return True
+            elif response.status_code == 404:
+                logger.warning(f"⚠️ Router {router_id} não encontrado (404)")
+                return False
+            else:
+                logger.warning(
+                    f"⚠️ Erro ao atualizar dados do router {router_id}: "
+                    f"HTTP {response.status_code} - {response.text[:200]}"
+                )
+                return False
+    except httpx.TimeoutException:
+        logger.error(f"⏱️ Timeout ao atualizar dados do router {router_id}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Erro ao atualizar dados do router {router_id} no banco: {e}")
+        return False
