@@ -252,14 +252,22 @@ async def update_router_data_in_api(router_id: str, data: Dict[str, Any]) -> boo
         url = f"{API_C_SHARP_URL}/api/routers/{router_id}"
         
         # Log detalhado do payload antes de enviar
-        logger.info(f"📤 Enviando atualização do router {router_id}")
+        import json as json_lib
+        logger.info(f"📤 [ROUTEROS] Enviando atualização do router {router_id}")
         logger.info(f"   URL: {url}")
         logger.info(f"   Campos: {list(data.keys())}")
-        for key, value in data.items():
-            if key == "hardwareInfo" and isinstance(value, str) and len(value) > 100:
-                logger.info(f"   {key}: {value[:100]}... (truncado)")
-            else:
-                logger.info(f"   {key}: {value}")
+        # Log completo do JSON
+        try:
+            json_payload = json_lib.dumps(data, indent=2, ensure_ascii=False)
+            logger.info(f"   📋 Payload completo (JSON):\n{json_payload}")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Erro ao serializar payload para log: {e}")
+            # Fallback: log campo por campo
+            for key, value in data.items():
+                if key == "hardwareInfo" and isinstance(value, str) and len(value) > 200:
+                    logger.info(f"   {key}: {value[:200]}... (truncado, tamanho total: {len(value)} chars)")
+                else:
+                    logger.info(f"   {key}: {value}")
         
         async with httpx.AsyncClient(timeout=30.0, verify=verify_ssl) as client:
             response = await client.put(
