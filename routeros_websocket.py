@@ -1238,6 +1238,7 @@ async def handle_get_status(router_id: str, router_ip: str, username: str, passw
                 identity = sanitized_status.get("identity", {})
                 
                 # Preparar dados para atualização
+                # IMPORTANTE: Usar PascalCase para compatibilidade com C# (LastSeenAt, Latency, HardwareInfo, etc)
                 router_update_data = {
                     "status": 1  # RouterStatus.Online
                 }
@@ -1288,8 +1289,8 @@ async def handle_get_status(router_id: str, router_ip: str, username: str, passw
                         router_update_data["model"] = str(resource["architecture-name"])
                 
                 # Atualizar no banco (em background, não bloquear resposta)
+                logger.info(f"📤 Atualizando dados do router {router_id} no banco: {list(router_update_data.keys())}")
                 asyncio.create_task(update_router_data_in_api(router_id, router_update_data))
-                logger.debug(f"📤 Dados do router {router_id} sendo atualizados no banco: {list(router_update_data.keys())}")
                 
             except Exception as update_error:
                 logger.warning(f"⚠️ Erro ao atualizar dados do router {router_id} no banco: {update_error}")

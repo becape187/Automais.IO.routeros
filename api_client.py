@@ -251,6 +251,16 @@ async def update_router_data_in_api(router_id: str, data: Dict[str, Any]) -> boo
         verify_ssl = os.getenv("API_C_SHARP_VERIFY_SSL", "true").lower() == "true"
         url = f"{API_C_SHARP_URL}/api/routers/{router_id}"
         
+        # Log detalhado do payload antes de enviar
+        logger.info(f"📤 Enviando atualização do router {router_id}")
+        logger.info(f"   URL: {url}")
+        logger.info(f"   Campos: {list(data.keys())}")
+        for key, value in data.items():
+            if key == "hardwareInfo" and isinstance(value, str) and len(value) > 100:
+                logger.info(f"   {key}: {value[:100]}... (truncado)")
+            else:
+                logger.info(f"   {key}: {value}")
+        
         async with httpx.AsyncClient(timeout=30.0, verify=verify_ssl) as client:
             response = await client.put(
                 url,
@@ -259,16 +269,17 @@ async def update_router_data_in_api(router_id: str, data: Dict[str, Any]) -> boo
             )
             
             if response.status_code == 200:
-                logger.debug(f"✅ Dados do router {router_id} atualizados: {list(data.keys())}")
+                logger.info(f"✅ Dados do router {router_id} atualizados com sucesso: {list(data.keys())}")
                 return True
             elif response.status_code == 404:
                 logger.warning(f"⚠️ Router {router_id} não encontrado (404)")
                 return False
             else:
-                logger.warning(
-                    f"⚠️ Erro ao atualizar dados do router {router_id}: "
-                    f"HTTP {response.status_code} - {response.text[:200]}"
+                logger.error(
+                    f"❌ Erro ao atualizar dados do router {router_id}: "
+                    f"HTTP {response.status_code} - {response.text[:500]}"
                 )
+                logger.error(f"   Payload enviado: {data}")
                 return False
     except httpx.TimeoutException:
         logger.error(f"⏱️ Timeout ao atualizar dados do router {router_id}")
