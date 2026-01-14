@@ -301,15 +301,36 @@ def _get_router_connection_sync(router_id: str, router_ip: str, username: str, p
                 del router_connections[router_id]
         
         # Criar nova conexão usando routeros_api.connect()
-        logger.debug(f"🔌 Criando nova conexão RouterOS para {router_ip} com usuário '{username}'")
+        # IMPORTANTE: routeros_api.connect() usa porta 8728 por padrão
+        # O router_ip deve ser o IP da VPN (ex: 10.222.111.2), não o IP público
+        logger.info(f"🔌 Criando nova conexão RouterOS para {router_ip}:8728 com usuário '{username}'")
+        logger.info(f"   Router ID: {router_id}")
+        logger.info(f"   IP usado: {router_ip} (deve ser IP da VPN, não IP público)")
         logger.debug(f"   Detalhes da senha: length={len(password) if password else 0}, tipo={type(password)}, primeiro_char={ord(password[0]) if password and len(password) > 0 else 'N/A'}, último_char={ord(password[-1]) if password and len(password) > 0 else 'N/A'}")
+        
+        # Verificar se o IP parece ser da VPN (começa com 10., 172.16-31., ou 192.168.)
+        is_vpn_ip = (
+            router_ip.startswith("10.") or 
+            router_ip.startswith("172.16.") or router_ip.startswith("172.17.") or 
+            router_ip.startswith("172.18.") or router_ip.startswith("172.19.") or
+            router_ip.startswith("172.20.") or router_ip.startswith("172.21.") or
+            router_ip.startswith("172.22.") or router_ip.startswith("172.23.") or
+            router_ip.startswith("172.24.") or router_ip.startswith("172.25.") or
+            router_ip.startswith("172.26.") or router_ip.startswith("172.27.") or
+            router_ip.startswith("172.28.") or router_ip.startswith("172.29.") or
+            router_ip.startswith("172.30.") or router_ip.startswith("172.31.") or
+            router_ip.startswith("192.168.")
+        )
+        if not is_vpn_ip:
+            logger.warning(f"⚠️ ATENÇÃO: IP {router_ip} não parece ser um IP privado/VPN. A conexão pode falhar se o router só aceita conexões via VPN.")
         
         try:
             # RouterOS 6.43+ requer plaintext_login=True
             # Tentar primeiro com plaintext_login (método moderno)
+            # routeros_api.connect() usa porta 8728 por padrão
             try:
                 api = routeros_api.connect(router_ip, username=username, password=password, plaintext_login=True)
-                logger.info(f"✅ Conexão RouterOS estabelecida com sucesso (plaintext_login) para {router_ip} (usuário: {username})")
+                logger.info(f"✅ Conexão RouterOS estabelecida com sucesso (plaintext_login) para {router_ip}:8728 (usuário: {username})")
             except TypeError:
                 # Se plaintext_login não for suportado na função connect(), tentar sem
                 logger.debug(f"⚠️ plaintext_login não suportado em connect(), tentando método alternativo...")
@@ -333,9 +354,14 @@ def _get_router_connection_sync(router_id: str, router_ip: str, username: str, p
                 # Não falhar ainda, pode ser um problema temporário
                 
         except RouterOsApiConnectionError as e:
-            logger.error(f"❌ Erro de conexão RouterOS para {router_ip}: {e}")
-            logger.error(f"   Detalhes: IP={router_ip}, User='{username}', Password length={len(password) if password else 0}")
+            logger.error(f"❌ Erro de conexão RouterOS para {router_ip}:8728: {e}")
+            logger.error(f"   Detalhes: IP={router_ip}, Porta=8728 (padrão), User='{username}', Password length={len(password) if password else 0}")
             logger.error(f"   Tipo de exceção: RouterOsApiConnectionError")
+            logger.error(f"   Possíveis causas:")
+            logger.error(f"     1. Porta 8728 bloqueada no firewall do Mikrotik na interface WireGuard")
+            logger.error(f"     2. IP {router_ip} não é acessível via VPN (verificar roteamento)")
+            logger.error(f"     3. RouterOS API não está habilitada ou porta 8728 não está escutando")
+            logger.error(f"     4. IP incorreto (deve ser IP da VPN, não IP público)")
             raise
         except RouterOsApiCommunicationError as e:
             error_str = str(e).lower()
@@ -1214,12 +1240,19 @@ async def handle_get_status(router_id: str, router_ip: str, username: str, passw
         await ws.send(json.dumps(response, ensure_ascii=False))
         
     except asyncio.TimeoutError:
-        logger.error(f"Timeout ao verificar status do router {router_id}")
-        error_message = "Timeout ao verificar status (operação demorou mais de 5 segundos)"
+        logger.error(f"⏱️ Timeout ao verificar status do router {router_id} em {router_ip}:8728")
+        logger.error(f"   Possíveis causas:")
+        logger.error(f"     1. Porta 8728 não está acessível via VPN (firewall bloqueando)")
+        logger.error(f"     2. IP {router_ip} não está roteando corretamente na VPN")
+        logger.error(f"     3. RouterOS API não está respondendo (serviço desabilitado?)")
+        logger.error(f"     4. Latência muito alta na VPN")
+        error_message = f"Timeout ao verificar status (operação demorou mais de 5 segundos). IP usado: {router_ip}:8728"
         response = {
             "success": False,
             "connected": False,
-            "error": error_message
+            "error": error_message,
+            "router_ip": router_ip,
+            "port": 8728
         }
         if request_id:
             response["id"] = request_id
@@ -1473,7 +1506,9 @@ async def handle_websocket(ws: WebSocketServerProtocol, path: str):
                         allowed_ips = peers[0].get("allowedIps", "")
                         if allowed_ips:
                             router_ip = allowed_ips.split(",")[0].strip().split("/")[0]
-                            logger.info(f"IP extraído do peer WireGuard: {router_ip}")
+                            logger.info(f"✅ IP extraído do peer WireGuard: {router_ip} (este é o IP da VPN que deve ser usado para conectar na porta 8728)")
+                        else:
+                            logger.warning(f"Peer encontrado mas allowedIps está vazio")
                     else:
                         logger.warning(f"Nenhum peer WireGuard encontrado para router {router_id}")
                 
